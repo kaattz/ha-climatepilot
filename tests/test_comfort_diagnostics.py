@@ -33,49 +33,36 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-# Defensive isolation: see the note in tests/test_heat_source.py. The engine
-# itself must not import HA (asserted below); this guard only keeps the *test
-# module* importable when the package ``__init__.py`` regresses.
-try:  # pragma: no cover - import guard
-    import custom_components.climatepilot as _real_package  # noqa: F401
-except Exception:  # pragma: no cover - defensive fallback
-    import types
+# Import isolation via the shared alias loader (see tests/_engine_loader.py).
+# The engine is loaded under an alias package name so importing it never runs
+# ``custom_components/climatepilot/__init__.py`` (which pulls in Home Assistant
+# and the coordinator).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _engine_loader import load_engine
 
-    _parent = sys.modules.get("custom_components")
-    if _parent is None:
-        _parent = types.ModuleType("custom_components")
-        sys.modules["custom_components"] = _parent
-    _parent.__path__ = [str(_REPO_ROOT / "custom_components")]  # type: ignore[attr-defined]
+cd = load_engine("comfort_diagnostics")
+_const = load_engine("const")
 
-    _stub = types.ModuleType("custom_components.climatepilot")
-    _stub.__path__ = [str(_REPO_ROOT / "custom_components" / "climatepilot")]  # type: ignore[attr-defined]
-    sys.modules["custom_components.climatepilot"] = _stub
-    _parent.climatepilot = _stub  # type: ignore[attr-defined]
+ComfortAnalyser = cd.ComfortAnalyser
+ComfortSample = cd.ComfortSample
+ComfortVerdict = cd.ComfortVerdict
 
-from custom_components.climatepilot import comfort_diagnostics as cd
-from custom_components.climatepilot.comfort_diagnostics import (
-    ComfortAnalyser,
-    ComfortSample,
-    ComfortVerdict,
-)
-from custom_components.climatepilot.const import (
-    ADVICE_CHECK_HYDRAULICS,
-    ADVICE_CHECK_SCHEDULE,
-    ADVICE_LOWER_SUPPLY,
-    ADVICE_NONE,
-    ADVICE_RAISE_SUPPLY,
-    COMFORT_OK,
-    COMFORT_OVERHEATING,
-    COMFORT_UNDERHEATING,
-    COMFORT_UNKNOWN,
-    DEFAULT_COMFORT_SAMPLE_INTERVAL,
-    DEFAULT_COMFORT_WINDOW,
-    DEFAULT_OVERHEAT_DELTA,
-    DEFAULT_OVERHEAT_DWELL,
-    DEFAULT_UNDERHEAT_DELTA,
-    DEFAULT_UNDERHEAT_DWELL,
-    REASON_BELOW_TARGET_WITHOUT_DEMAND,
-)
+ADVICE_CHECK_HYDRAULICS = _const.ADVICE_CHECK_HYDRAULICS
+ADVICE_CHECK_SCHEDULE = _const.ADVICE_CHECK_SCHEDULE
+ADVICE_LOWER_SUPPLY = _const.ADVICE_LOWER_SUPPLY
+ADVICE_NONE = _const.ADVICE_NONE
+ADVICE_RAISE_SUPPLY = _const.ADVICE_RAISE_SUPPLY
+COMFORT_OK = _const.COMFORT_OK
+COMFORT_OVERHEATING = _const.COMFORT_OVERHEATING
+COMFORT_UNDERHEATING = _const.COMFORT_UNDERHEATING
+COMFORT_UNKNOWN = _const.COMFORT_UNKNOWN
+DEFAULT_COMFORT_SAMPLE_INTERVAL = _const.DEFAULT_COMFORT_SAMPLE_INTERVAL
+DEFAULT_COMFORT_WINDOW = _const.DEFAULT_COMFORT_WINDOW
+DEFAULT_OVERHEAT_DELTA = _const.DEFAULT_OVERHEAT_DELTA
+DEFAULT_OVERHEAT_DWELL = _const.DEFAULT_OVERHEAT_DWELL
+DEFAULT_UNDERHEAT_DELTA = _const.DEFAULT_UNDERHEAT_DELTA
+DEFAULT_UNDERHEAT_DWELL = _const.DEFAULT_UNDERHEAT_DWELL
+REASON_BELOW_TARGET_WITHOUT_DEMAND = _const.REASON_BELOW_TARGET_WITHOUT_DEMAND
 
 T0 = datetime(2026, 1, 15, 8, 0, tzinfo=UTC)
 MODULE_PATH = Path(cd.__file__)

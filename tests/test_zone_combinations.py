@@ -30,38 +30,25 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-# Defensive isolation: see the note in tests/test_heat_source.py. The engine
-# itself must not import HA (asserted below); this guard only keeps the *test
-# module* importable when the package ``__init__.py`` regresses.
-try:  # pragma: no cover - import guard
-    import custom_components.climatepilot as _real_package  # noqa: F401
-except Exception:  # pragma: no cover - defensive fallback
-    import types
+# Import isolation via the shared alias loader (see tests/_engine_loader.py).
+# The engine is loaded under an alias package name so importing it never runs
+# ``custom_components/climatepilot/__init__.py`` (which pulls in Home Assistant
+# and the coordinator).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _engine_loader import load_engine
 
-    _parent = sys.modules.get("custom_components")
-    if _parent is None:
-        _parent = types.ModuleType("custom_components")
-        sys.modules["custom_components"] = _parent
-    _parent.__path__ = [str(_REPO_ROOT / "custom_components")]  # type: ignore[attr-defined]
+zc = load_engine("zone_combinations")
+_const = load_engine("const")
 
-    _stub = types.ModuleType("custom_components.climatepilot")
-    _stub.__path__ = [str(_REPO_ROOT / "custom_components" / "climatepilot")]  # type: ignore[attr-defined]
-    sys.modules["custom_components.climatepilot"] = _stub
-    _parent.climatepilot = _stub  # type: ignore[attr-defined]
+COMBINATION_NONE = _const.COMBINATION_NONE
+DEFAULT_COMBINATION_DOMINANT_SHARE = _const.DEFAULT_COMBINATION_DOMINANT_SHARE
+DEFAULT_COMBINATION_MIN_DURATION = _const.DEFAULT_COMBINATION_MIN_DURATION
+DEFAULT_COMBINATION_MIN_DWELL = _const.DEFAULT_COMBINATION_MIN_DWELL
+DEFAULT_COMBINATION_WINDOW = _const.DEFAULT_COMBINATION_WINDOW
 
-from custom_components.climatepilot import zone_combinations as zc
-from custom_components.climatepilot.const import (
-    COMBINATION_NONE,
-    DEFAULT_COMBINATION_DOMINANT_SHARE,
-    DEFAULT_COMBINATION_MIN_DURATION,
-    DEFAULT_COMBINATION_MIN_DWELL,
-    DEFAULT_COMBINATION_WINDOW,
-)
-from custom_components.climatepilot.zone_combinations import (
-    CombinationObservation,
-    CombinationStat,
-    ZoneCombinationTracker,
-)
+CombinationObservation = zc.CombinationObservation
+CombinationStat = zc.CombinationStat
+ZoneCombinationTracker = zc.ZoneCombinationTracker
 
 T0 = datetime(2026, 1, 15, 8, 0, tzinfo=UTC)
 MODULE_PATH = Path(zc.__file__)

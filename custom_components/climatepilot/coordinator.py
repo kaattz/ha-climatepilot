@@ -36,15 +36,26 @@ from .climate_adapter import ClimateAdapter, ClimateSnapshot
 from .comfort_diagnostics import ComfortAnalyser, ComfortVerdict
 from .const import (
     CIRCUIT_HEATING,
+    COMFORT_OVERHEATING,
+    COMFORT_UNDERHEATING,
     CONF_AUX_LOAD,
     CONF_BOILER_ENTITY,
     CONF_BURNER_CIRCUIT,
     CONF_BURNER_STATE_ENTITY,
+    CONF_CONDENSING_RETURN_C,
     CONF_CONTROL_MODE,
+    CONF_DELTA_T_HEALTHY_MAX,
+    CONF_DELTA_T_HEALTHY_MIN,
+    CONF_DELTA_T_WINDOW_SECONDS,
     CONF_HEAT_SOURCE,
     CONF_OUTDOOR_STALE_MINUTES,
     CONF_OUTDOOR_TEMP_ENTITY,
+    CONF_PROBE_FROZEN_SECONDS,
+    CONF_PROBE_MAX_DIVERGENCE,
+    CONF_PROBE_STALE_SECONDS,
+    CONF_RETURN_TEMP_ENTITY,
     CONF_SHORT_CYCLE_SECONDS,
+    CONF_SUPPLY_PROBE_ENTITY,
     CONF_SYSTEM_NAME,
     CONF_VERIFY_HEATING_ONLY,
     CONF_VERIFY_MIN_FLOW,
@@ -54,8 +65,15 @@ from .const import (
     CONF_ZONES,
     CONTROL_MODE_COORDINATE,
     CONTROL_MODE_OBSERVE,
+    DEFAULT_CONDENSING_RETURN_C,
+    DEFAULT_DELTA_T_HEALTHY_MAX,
+    DEFAULT_DELTA_T_HEALTHY_MIN,
+    DEFAULT_DELTA_T_WINDOW,
     DEFAULT_NAME,
     DEFAULT_PERIODIC_AUDIT,
+    DEFAULT_PROBE_FROZEN_AFTER,
+    DEFAULT_PROBE_MAX_DIVERGENCE,
+    DEFAULT_PROBE_STALE_AFTER,
     DEFAULT_SHORT_CYCLE_SECONDS,
     DEFAULT_STARTUP_GRACE,
     DEFAULT_TARGET_STEP,
@@ -76,6 +94,7 @@ from .const import (
     WEATHER_MODE_APPLY,
     WEATHER_MODE_SUGGEST,
 )
+from .delta_t_diagnostics import DeltaTDiagnostics, DeltaTReport
 from .diagnostics_engine import BurnerStats
 from .heat_source import (
     BoilerCapabilities,
@@ -90,6 +109,11 @@ from .models import (
     SetpointDecision,
     WeatherCurve,
     ZoneState,
+)
+from .probe_monitor import (
+    ProbeMonitor,
+    ProbePairAssessment,
+    ProbeReading,
 )
 from .store import ClimatePilotStore
 from .temperature_arbiter import TemperatureArbiter, active_slot_key
@@ -155,6 +179,28 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.combinations_tracker = ZoneCombinationTracker()
         self.comfort_analyser = ComfortAnalyser()
 
+        # --- V0.3 external pipe probes ------------------------------------
+        # These are monitoring/optimisation inputs only. They never gate a
+        # write: a failed probe degrades the diagnostics, never the heating
+        # (design doc 8, V0.3 delivery standard).
+        self.probe_monitor = ProbeMonitor(
+            stale_after=float(options.get(CONF_PROBE_STALE_SECONDS, DEFAULT_PROBE_STALE_AFTER)),
+            frozen_after=float(options.get(CONF_PROBE_FROZEN_SECONDS, DEFAULT_PROBE_FROZEN_AFTER)),
+            max_divergence=float(
+                options.get(CONF_PROBE_MAX_DIVERGENCE, DEFAULT_PROBE_MAX_DIVERGENCE)
+            ),
+        )
+        self.delta_t_engine = DeltaTDiagnostics(
+            window=float(options.get(CONF_DELTA_T_WINDOW_SECONDS, DEFAULT_DELTA_T_WINDOW)),
+            healthy_min=float(options.get(CONF_DELTA_T_HEALTHY_MIN, DEFAULT_DELTA_T_HEALTHY_MIN)),
+            healthy_max=float(options.get(CONF_DELTA_T_HEALTHY_MAX, DEFAULT_DELTA_T_HEALTHY_MAX)),
+            condensing_return_c=float(
+                options.get(CONF_CONDENSING_RETURN_C, DEFAULT_CONDENSING_RETURN_C)
+            ),
+        )
+        self.return_probe_entity: str | None = options.get(CONF_RETURN_TEMP_ENTITY)
+        self.supply_probe_entity: str | None = options.get(CONF_SUPPLY_PROBE_ENTITY)
+
         self.store = ClimatePilotStore(hass, self.system_id)
 
         # --- runtime state ----------------------------------------------
@@ -170,6 +216,17 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         #: V0.2 diagnostics, refreshed every evaluation cycle.
         self.combinations: CombinationReport = self.combinations_tracker.report(dt_util.now())
         self.comfort: dict[str, ComfortVerdict] = {}
+
+        #: V0.3 probe diagnostics. A ``None`` value is meaningful: it says "no
+        #: usable probe", which is different from "the pipe is cold". Seeded
+        #: with empty readings so the properties are never ``None`` before the
+        #: first cycle.
+        self.probes: ProbePairAssessment = self.probe_monitor.assess_pair(
+            ProbeReading(entity_id="", value=None, updated_at=None),
+            ProbeReading(entity_id="", value=None, updated_at=None),
+            dt_util.now(),
+        )
+        self.delta_t: DeltaTReport = self.delta_t_engine.report(dt_util.now())
 
         self._zone_slot_keys: dict[str, tuple[Any, ...] | None] = {}
         self._started_at: datetime = dt_util.now()
@@ -691,6 +748,97 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self.comfort = self.comfort_analyser.verdicts(now)
 
+        self._async_update_v03_diagnostics(now)
+
+    def _async_update_v03_diagnostics(self, now: datetime) -> None:
+        """Refresh the external pipe-probe diagnostics.
+
+        Strictly observation-only, by design: the V0.3 delivery standard is that
+        a failed probe must not affect core heating. Nothing here feeds back
+        into arbitration, the state machine, or any write - the probes exist to
+        explain *why* the system behaves as it does, and to suggest a curve
+        calibration the user may choose to apply.
+
+        ``None`` is carried through rather than substituted: an absent reading
+        means "no usable probe", which must never be rendered as a cold pipe.
+        """
+        burning = bool((self.diagnostics_snapshot.get("burner") or {}).get("burning", False))
+
+        supply_reading = self._probe_reading(self.supply_probe_entity)
+        return_reading = self._probe_reading(self.return_probe_entity)
+
+        self.probes = self.probe_monitor.assess_pair(
+            supply_reading, return_reading, now, burning=burning
+        )
+
+        # The delta-T engine only sees values that survived the probe checks.
+        supply_value = self.probes.supply.value if self.probes.supply.usable else None
+        return_value = self.probes.return_.value if self.probes.return_.usable else None
+
+        underheating = sum(
+            1 for verdict in self.comfort.values() if verdict.verdict == COMFORT_UNDERHEATING
+        )
+        overheating = sum(
+            1 for verdict in self.comfort.values() if verdict.verdict == COMFORT_OVERHEATING
+        )
+
+        self.delta_t_engine.note(
+            supply=supply_value,
+            return_=return_value,
+            burning=burning,
+            active_zones=self.active_zone_count,
+            now=now,
+            underheating_zones=underheating,
+            overheating_zones=overheating,
+        )
+        self.delta_t = self.delta_t_engine.report(now)
+
+    def _probe_reading(self, entity_id: str | None) -> ProbeReading:
+        """Read one probe entity into a raw, un-judged reading.
+
+        Deliberately does not interpret: sentinel rejection, range checks and
+        staleness belong to the probe monitor, so the policy lives in one place
+        and is testable without Home Assistant.
+        """
+        if not entity_id:
+            return ProbeReading(entity_id="", value=None, updated_at=None, raw=None)
+
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return ProbeReading(entity_id=entity_id, value=None, updated_at=None)
+
+        raw = state.state
+        if raw in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return ProbeReading(entity_id=entity_id, value=None, updated_at=None, raw=raw)
+
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return ProbeReading(entity_id=entity_id, value=None, updated_at=None, raw=raw)
+
+        return ProbeReading(
+            entity_id=entity_id,
+            value=value,
+            updated_at=state.last_updated,
+            raw=raw,
+        )
+
+    @property
+    def probe_fault(self) -> bool:
+        """True when any *configured* probe is not usable.
+
+        An unconfigured probe is not a fault: most installations have no
+        external probes at all, and reporting a permanent fault would train the
+        user to ignore the flag.
+        """
+        if self.supply_probe_entity and not self.probes.supply.usable:
+            return True
+        return bool(self.return_probe_entity and not self.probes.return_.usable)
+
+    @property
+    def probes_configured(self) -> bool:
+        return bool(self.supply_probe_entity or self.return_probe_entity)
+
     @property
     def cycling_quality(self) -> str:
         """Combustion quality grade over the diagnostics window."""
@@ -808,6 +956,8 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # diagnostics exist to surface.
         self.combinations_tracker.restore(data.get("combinations"))
         self.comfort_analyser.restore(data.get("comfort"))
+        self.probe_monitor.restore(data.get("probes"))
+        self.delta_t_engine.restore(data.get("delta_t"))
         _LOGGER.info("Restored ClimatePilot state for %d zones", len(stored_zones))
 
     def _async_schedule_save(self) -> None:
@@ -828,6 +978,8 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "burner": self.burner.snapshot(now),
             "combinations": self.combinations_tracker.snapshot(),
             "comfort": self.comfort_analyser.snapshot(),
+            "probes": self.probe_monitor.snapshot(),
+            "delta_t": self.delta_t_engine.snapshot(),
             "control_mode": self.control_mode,
         }
 

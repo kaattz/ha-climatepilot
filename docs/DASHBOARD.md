@@ -42,7 +42,7 @@ slugify，`slugify("客厅地暖 采暖请求")` 会得到 `ke_ting_di_nuan_cai_
 ### 参考安装的实际 ID 对照表
 
 本仓库测试用的参考安装：系统名"我的家"，房间"客厅地暖" / "主卧地暖"，界面语言 `zh-Hans`。
-下表是**从真实 HA 实例的 `entity_registry` 读出来的**（不是推算的），共 31 个 translation_key：
+下表是**从真实 HA 实例的 `entity_registry` 读出来的**（不是推算的），共 38 个 translation_key：
 
 | translation_key（固定，不会变） | 实际实体 ID（英文 slug） |
 |---|---|
@@ -77,6 +77,19 @@ slugify，`slugify("客厅地暖 采暖请求")` 会得到 `ke_ting_di_nuan_cai_
 | `select.zone_mode`（每房间） | `select.<room>_room_mode` |
 | `button.resume_auto`（每房间） | `button.<room>_resume_automatic` |
 | `switch.auxiliary_load`（每房间） | `switch.<room>_auxiliary_heat_load` |
+
+V0.3 新增 7 个（全部系统级，见 INTERFACES_V0.3.md 第 3 节）。这 7 个的
+**英文名恰好与 translation_key 逐字相同**（已冻结，E-I18N 不得改动），所以 ID 无需查表：
+
+| translation_key（固定） | 英文名 | 实际实体 ID |
+|---|---|---|
+| `sensor.return_temperature` | Return temperature | `sensor.wo_de_jia_return_temperature` |
+| `sensor.delta_t` | Delta T | `sensor.wo_de_jia_delta_t` |
+| `sensor.delta_t_quality` | Delta T quality | `sensor.wo_de_jia_delta_t_quality` |
+| `sensor.condensing_regime` | Condensing regime | `sensor.wo_de_jia_condensing_regime` |
+| `sensor.hydraulic_verdict` | Hydraulic verdict | `sensor.wo_de_jia_hydraulic_verdict` |
+| `sensor.curve_calibration_advice` | Curve calibration advice | `sensor.wo_de_jia_curve_calibration_advice` |
+| `binary_sensor.probe_fault` | Probe fault | `binary_sensor.wo_de_jia_probe_fault` |
 
 `<room>` 是**房间名**的 slug：客厅地暖 → `ke_ting_di_nuan`，主卧地暖 → `zhu_wo_di_nuan`，
 英文房间名则直接用（`Living room` → `living_room`）。
@@ -231,7 +244,38 @@ lovelace:
 | 短循环告警 | 只看采暖 + 未知类型燃烧；燃烧状态丢失时实体不可用，而不是显示"正常" |
 | 受限运行 | 系统是否处于受限状态，属性 `reasons` 会点名具体原因（热源受限 / 分区状态未知 / 天气数据不可用） |
 
-### 3.4 每个房间
+### 3.4 探头与供回水温差（V0.3，可选设备）
+
+这一组卡片**需要外贴探头**才有数据。没装探头时它们全部显示 `unknown`，这是正常状态，不是故障
+（详见第 4 节）。
+
+**先记住一件事：温差不是热功率，也不是效率。** ΔT 只是**流动与冷凝工况的间接指标**。
+面板上每个相关实体的属性里都有 `is_power_measurement: false`，`reason_codes` 里也有
+`temperature_difference_is_not_heat_power`——这是刻意留的"别误读"标记。
+
+| 卡片 / 属性 | 含义 |
+|---|---|
+| 回水温度 (state) | 外贴回水探头读数。`unknown` = 没有可用读数（没装 / 过期 / 卡死 / 不可信），**不是 0℃** |
+| `supply` / `return` | 供回两侧各自的 `quality` 与 `reason_codes`，用来判断是哪一侧的问题 |
+| `divergence` | 供回探头互相比对的偏差。超过阈值说明**两个探头至少有一个错了**，此时两侧都被判为不可信（无法判断哪个错） |
+| 供回水温差 ΔT (state) | 供水 − 回水。只有两个探头都可用时才有值，`unknown` 表示**测不出来**，不是"温差为 0" |
+| `average` / `minimum` / `maximum` | 窗口内的统计值。看趋势用 `trend_per_hour`（正 = 温差在扩大） |
+| `stable_seconds` | 已稳定时长。低于稳定门槛时不下水力判定——刚开机/刚切换时的 ΔT 没有意义 |
+| 探头质量 (state) | 取供回**较差**的一侧：`valid` / `stale` / `implausible` / `frozen` / `probe_unavailable` |
+| 冷凝工况 (state) | `likely` / `unlikely` / `unknown`，由**燃烧中**的回水温度推断，是**间接**指标 |
+| 水力判定 (state) | `ok` / `low_flow` / `high_flow` / `unbalanced` / `unknown`。**低 ΔT 通常意味着流量过大或旁通短路，高 ΔT 意味着流量不足**——两者都是水力信号，不是"效率好坏" |
+| 曲线校准建议 (state) | `none` / `raise_supply_curve` / `lower_supply_curve` / `insufficient_data`。**纯建议**：`advisory_only: true`，集成**绝不自动改**天气曲线 |
+| 探头故障 | 只看**已配置**的探头是否不可用。**没装探头时恒为 off**——若默认报故障，用户会被训练成忽略这个标志 |
+
+`85` 这个数字要特别小心：DS18B20 未完成转换时会输出 **85℃ 哨兵值**。它看起来像"很热的供水管"，
+天真的实现会报出不存在的锅炉故障、或算出一个"巨大 ΔT"看起来像水力成功。集成把它判为
+`implausible` 并让读数变成 `unknown`，所以看到 `unknown` 不要以为是探头坏了。
+
+**探头坏了会怎样**：什么都不影响。探头只作监测/优化输入，**绝不承担锅炉安全停机功能**，也绝不
+参与任何写入决策（`probe_fault` 实体的 `affects_heating: false` 就是这个意思）。外置探头失联时
+采暖照常运行，只是这一组卡片没有数据。
+
+### 3.5 每个房间
 
 按"先仲裁、后舒适"的顺序排：
 

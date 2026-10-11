@@ -23,8 +23,22 @@ sys.path.insert(0, str(_REPO_ROOT))
 # module* importable when the package ``__init__.py`` regresses.
 try:  # pragma: no cover - import guard
     import custom_components.climatepilot as _real_package  # noqa: F401
-except Exception:  # pragma: no cover - defensive fallback
+except Exception as _import_error:  # pragma: no cover - defensive fallback
+    # Loud, not silent on purpose: the engines are fine, but the integration
+    # package just failed to import. Printing it here means the real cause is
+    # visible instead of surfacing later as a confusing error in a module
+    # that merely happened to import the package first.
+    import sys as _sys
     import types
+
+    print(
+        f"\n[engine-test isolation] custom_components.climatepilot failed to "
+        f"import: {type(_import_error).__name__}: {_import_error}\n"
+        f"[engine-test isolation] falling back to a stub so the pure-engine "
+        f"tests still run. THE INTEGRATION ITSELF IS BROKEN - see "
+        f"tests/test_integration_setup.py for the real failure.\n",
+        file=_sys.stderr,
+    )
 
     _parent = sys.modules.get("custom_components")
     if _parent is None:

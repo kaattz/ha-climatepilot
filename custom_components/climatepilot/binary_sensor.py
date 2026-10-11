@@ -5,7 +5,11 @@ for automations:
 
 * ``manual_override`` / ``heat_request`` -- per room (design doc 4, 6.1);
 * ``short_cycle_alert`` / ``degraded`` -- system diagnostics (design doc 8, 11);
-* ``overheating`` / ``underheating`` -- per room comfort faults (V0.2, section 3.2).
+* ``overheating`` / ``underheating`` -- per room comfort faults (V0.2, section 3.2);
+* ``probe_fault`` -- a *configured* external pipe probe became unusable (V0.3).
+  Not a diagnostic entity: it is ``off`` when no probe is installed, because
+  "not fitted" is not "broken" and a permanently-on flag teaches users to
+  ignore it.
 
 Unknown is never reported as "off": when the coordinator cannot tell whether a
 zone requests heat, when the burner reading is not trustworthy, or when the
@@ -31,6 +35,7 @@ from homeassistant.components.binary_sensor import (
 
 from .base import (
     ClimatePilotDiagnosticEntity,
+    ClimatePilotEntity,
     ClimatePilotZoneEntity,
 )
 from .const import (
@@ -148,6 +153,66 @@ class DegradedBinarySensor(_SystemDiagnosticBinarySensor):
             "control_mode": snapshot.get("control_mode"),
             "reasons": reasons,
         }
+
+
+class ProbeFaultBinarySensor(ClimatePilotEntity, BinarySensorEntity):
+    """Whether a *configured* external pipe probe has become unusable.
+
+    ``PROBLEM`` device class, but deliberately **not** a diagnostic entity: a
+    probe that fell off the pipe is something the occupant should see, not
+    something to file behind the diagnostic filter.
+
+    The semantics matter more than the plumbing, and they are:
+
+    * **no probe configured -> ``off``.** Most installations have no external
+      probes at all. Reporting a permanent fault would train the user to ignore
+      the flag, so an absent probe is not a fault.
+    * a *configured* probe that is missing, stale, frozen, implausible (the
+      DS18B20 85 °C sentinel) or out of range -> ``on``.
+
+    The coordinator owns that distinction in ``probe_fault``; this entity only
+    reports it, so the policy lives in one place.
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "probe_fault")
+        self._attr_translation_key = "probe_fault"
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self.coordinator.probe_fault)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Name which side failed and why, and repeat the "not power" caveat.
+
+        A failed probe degrades diagnostics only - it never changes a write - so
+        the entity states that outright rather than leaving the user to wonder
+        whether the heating is affected.
+        """
+        pair = self.coordinator.probes
+        attributes: dict[str, Any] = {
+            "configured": bool(getattr(self.coordinator, "probes_configured", False)),
+            "affects_heating": False,
+            "is_power_measurement": False,
+        }
+        if pair is None:
+            attributes["evaluated"] = False
+            return attributes
+        attributes.update(
+            {
+                "evaluated": True,
+                "supply_quality": pair.supply.quality,
+                "return_quality": pair.return_.quality,
+                "both_usable": pair.both_usable,
+                "supply_entity": pair.supply.entity_id or None,
+                "return_entity": pair.return_.entity_id or None,
+                "reason_codes": list(pair.reason_codes),
+            }
+        )
+        return attributes
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +423,7 @@ async def async_setup_entry(
     entities: list[BinarySensorEntity] = [
         ShortCycleAlertBinarySensor(coordinator),
         DegradedBinarySensor(coordinator),
+        ProbeFaultBinarySensor(coordinator),
     ]
 
     for zone_id in coordinator.zone_ids:

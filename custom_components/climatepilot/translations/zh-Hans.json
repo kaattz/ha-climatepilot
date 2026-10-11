@@ -10,12 +10,13 @@
       },
       "boiler": {
         "title": "热源",
-        "description": "选择锅炉/热泵的 climate 实体，以及用于诊断的燃烧状态与供回水温度传感器。",
+        "description": "选择锅炉/热泵的 climate 实体，以及用于诊断的燃烧状态与供回水温度传感器。外贴管道探头（V0.3）仅作监测输入，不承担锅炉安全功能。",
         "data": {
           "boiler_entity": "热源 climate 实体",
           "burner_state_entity": "燃烧器状态传感器（可选）",
           "supply_temp_entity": "供水温度传感器（可选）",
-          "return_temp_entity": "回水温度传感器（可选）"
+          "return_temp_entity": "回水温度传感器（可选）",
+          "supply_probe_entity": "外贴供水管探头（可选）"
         }
       },
       "verify": {
@@ -87,6 +88,7 @@
           "zones": "房间与温控器",
           "strategies": "温度策略与日程",
           "heat_source": "热源与天气补偿",
+          "probes": "外贴探头与 ΔT 诊断",
           "diagnostics": "诊断与恢复"
         }
       },
@@ -156,6 +158,19 @@
           "verify_min_flow_hydraulics": "已确认：水力条件已验收"
         }
       },
+      "probes": {
+        "title": "外贴探头与 ΔT 诊断",
+        "description": "外贴供回水探头的判定阈值。探头属于监测输入：探头故障只会降低诊断可信度，不会改变任何写入决策，锅炉自身的安全功能始终由锅炉负责。ΔT 是水力与冷凝工况的间接指标，不是热功率。",
+        "data": {
+          "probe_stale_seconds": "读数过期判定（秒）",
+          "probe_frozen_seconds": "数值卡死判定（秒，仅在燃烧时）",
+          "delta_t_window_seconds": "ΔT 滚动窗口（秒）",
+          "condensing_return_c": "冷凝判据回水温度（℃）",
+          "delta_t_healthy_min": "健康 ΔT 下限（℃）",
+          "delta_t_healthy_max": "健康 ΔT 上限（℃）",
+          "probe_max_divergence": "供回水最大允许偏差（℃）"
+        }
+      },
       "diagnostics": {
         "title": "诊断与恢复",
         "description": "短循环判定阈值，以及重启后的写保护与周期一致性校验间隔。",
@@ -177,6 +192,7 @@
       "invalid_schedule": "日程格式无效，请使用 HH:MM=温度，用 / 或换行分隔。",
       "invalid_curve": "曲线参数无效。",
       "invalid_range": "允许下限必须小于允许上限。",
+      "invalid_delta_t_range": "健康 ΔT 下限必须小于上限。",
       "unknown": "发生未知错误，请检查日志。"
     }
   },
@@ -321,6 +337,49 @@
           "check_schedule_or_override": "检查日程或手动覆盖",
           "none": "无需处理"
         }
+      },
+      "return_temperature": {
+        "name": "回水温度"
+      },
+      "delta_t": {
+        "name": "供回水温差 ΔT"
+      },
+      "delta_t_quality": {
+        "name": "探头读数质量",
+        "state": {
+          "valid": "有效",
+          "stale": "数据过期",
+          "implausible": "数值不可信",
+          "frozen": "数值卡死",
+          "probe_unavailable": "无探头读数"
+        }
+      },
+      "condensing_regime": {
+        "name": "冷凝工况（间接指标）",
+        "state": {
+          "likely": "可能在冷凝",
+          "unlikely": "不太可能冷凝",
+          "unknown": "未知"
+        }
+      },
+      "hydraulic_verdict": {
+        "name": "水力判定",
+        "state": {
+          "ok": "正常",
+          "low_flow": "温差偏低（流量过大或旁通短路）",
+          "high_flow": "温差偏高（流量不足）",
+          "unbalanced": "水力失衡",
+          "unknown": "未知"
+        }
+      },
+      "curve_calibration_advice": {
+        "name": "曲线校准建议",
+        "state": {
+          "none": "无需处理",
+          "raise_supply_curve": "考虑上调供水曲线",
+          "lower_supply_curve": "考虑下调供水曲线",
+          "insufficient_data": "数据不足"
+        }
       }
     },
     "binary_sensor": {
@@ -341,6 +400,9 @@
       },
       "underheating": {
         "name": "持续欠温"
+      },
+      "probe_fault": {
+        "name": "探头故障"
       }
     },
     "button": {

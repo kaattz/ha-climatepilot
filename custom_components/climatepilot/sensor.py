@@ -17,6 +17,13 @@ The V0.2 diagnostic sensors carry the engine output that explains *why* the
 system behaves as it does: the zone-combination report on
 ``combinations_24h`` and the comfort verdict on ``comfort_verdict`` expose their
 engine's ``as_dict()`` so the answer travels with the value (design doc 10.3).
+
+V0.3 adds six system-level sensors for the optional external pipe probes: the
+return temperature and ΔT readings, plus four diagnostic verdicts
+(``delta_t_quality``, ``condensing_regime``, ``hydraulic_verdict``,
+``curve_calibration_advice``). They are strictly observation-only - a failed
+probe never influences a write - and they publish ``None`` rather than a
+substituted value whenever a probe is absent or untrustworthy.
 """
 
 from __future__ import annotations
@@ -42,14 +49,27 @@ from .const import (
     ADVICE_LOWER_SUPPLY,
     ADVICE_NONE,
     ADVICE_RAISE_SUPPLY,
+    CALIBRATION_INSUFFICIENT_DATA,
+    CALIBRATION_LOWER_CURVE,
+    CALIBRATION_NONE,
+    CALIBRATION_RAISE_CURVE,
     COMFORT_OK,
     COMFORT_OVERHEATING,
     COMFORT_UNDERHEATING,
     COMFORT_UNKNOWN,
+    CONDENSING_LIKELY,
+    CONDENSING_UNKNOWN,
+    CONDENSING_UNLIKELY,
     DEFAULT_COMBINATION_WINDOW,
     DOMAIN,
     FEEDBACK_VALID,
     FSM_STATES,
+    HYDRAULIC_HIGH_FLOW,
+    HYDRAULIC_LOW_FLOW,
+    HYDRAULIC_OK,
+    HYDRAULIC_UNBALANCED,
+    HYDRAULIC_UNKNOWN,
+    PROBE_QUALITIES,
     QUALITY_FAIR,
     QUALITY_GOOD,
     QUALITY_POOR,
@@ -102,6 +122,30 @@ CYCLING_QUALITIES: list[str] = [
     QUALITY_FAIR,
     QUALITY_POOR,
     QUALITY_UNKNOWN,
+]
+
+#: V0.3 probe/delta-T verdict vocabularies (docs/INTERFACES_V0.3.md section 3).
+#: ``PROBE_QUALITIES`` is imported rather than restated: the engine owns the
+#: severity order and duplicating it here would let the two drift apart.
+CONDENSING_REGIMES: list[str] = [
+    CONDENSING_LIKELY,
+    CONDENSING_UNLIKELY,
+    CONDENSING_UNKNOWN,
+]
+
+HYDRAULIC_VERDICTS: list[str] = [
+    HYDRAULIC_OK,
+    HYDRAULIC_LOW_FLOW,
+    HYDRAULIC_HIGH_FLOW,
+    HYDRAULIC_UNBALANCED,
+    HYDRAULIC_UNKNOWN,
+]
+
+CALIBRATION_ADVICE: list[str] = [
+    CALIBRATION_NONE,
+    CALIBRATION_RAISE_CURVE,
+    CALIBRATION_LOWER_CURVE,
+    CALIBRATION_INSUFFICIENT_DATA,
 ]
 
 
@@ -539,6 +583,276 @@ class UnexplainedBurns24hSensor(_SystemDiagnosticSensor):
 
 
 # ---------------------------------------------------------------------------
+# System level - V0.3 external pipe probes and delta-T diagnostics
+#
+# HARD CONSTRAINT (docs/INTERFACES_V0.3.md section 1): a temperature difference
+# is **not** heat power. These entities describe flow and condensing *regimes*
+# indirectly; none of them may be read as thermal output or efficiency. The
+# engines stamp ``is_power_measurement = False`` and
+# ``REASON_NOT_A_POWER_MEASUREMENT`` into their exports and the entities carry
+# that straight through to the UI.
+#
+# The probe entities are monitoring/optimisation inputs only: a failed probe
+# never changes a write decision, so none of them can make the heating worse.
+#
+# "No probe installed" is not "the entity is broken": both readings below
+# publish ``None`` (state ``unknown``) while ``available`` stays True, so an
+# installation without external probes shows a calm unknown rather than a fault.
+# ---------------------------------------------------------------------------
+
+
+def _probe_assessment(coordinator: ClimatePilotCoordinator, side: str) -> Any:
+    """Return one side of the probe pair, or ``None`` before the first cycle."""
+    pair = coordinator.probes
+    if pair is None:
+        return None
+    return pair.supply if side == "supply" else pair.return_
+
+
+class ReturnTemperatureSensor(ClimatePilotEntity, SensorEntity):
+    """Return-pipe temperature from the optional external probe.
+
+    ``device_class`` is plain ``TEMPERATURE`` (not ``TEMPERATURE_DELTA``): this
+    is an absolute pipe temperature, so a unit conversion to °F must apply. It
+    is also *not* the boiler's own return reading - it is the strap-on probe
+    (design doc 12, V0.3).
+    """
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "return_temperature")
+        self._attr_translation_key = "return_temperature"
+
+    @property
+    def native_value(self) -> float | None:
+        """The reading, or ``None`` when no usable probe reported one.
+
+        ``None`` covers both "no probe configured" and "probe not trustworthy"
+        (missing, stale, frozen, or the DS18B20 85 °C sentinel). Rendering any of
+        those as a number would invent a pipe temperature that was never
+        measured - the 85 °C sentinel in particular reads like a very hot return
+        pipe and would look like a real measurement.
+        """
+        assessment = _probe_assessment(self.coordinator, "return")
+        return None if assessment is None else assessment.value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Carry the probe pair's own export so the verdict is explainable."""
+        pair = self.coordinator.probes
+        if pair is None:
+            return {"evaluated": False}
+        attributes = dict(pair.as_dict())
+        attributes["evaluated"] = True
+        return attributes
+
+
+class DeltaTSensor(ClimatePilotEntity, SensorEntity):
+    """Supply-minus-return temperature difference.
+
+    ``TEMPERATURE_DELTA`` is the correct device class rather than
+    ``TEMPERATURE``: a difference converts between °C and K one-to-one, whereas
+    ``TEMPERATURE`` would apply an offset and turn 8 °C into 46.4 °F. Home
+    Assistant validates the unit against the class, so ``°C`` is accepted here.
+    """
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE_DELTA
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "delta_t")
+        self._attr_translation_key = "delta_t"
+
+    @property
+    def native_value(self) -> float | None:
+        report = self.coordinator.delta_t
+        return None if report is None else report.delta_t
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Ship the engine's full report, including the "not power" marker.
+
+        ``is_power_measurement`` is always ``False`` and is published verbatim so
+        neither a human nor a dashboard template can mistake ΔT for heat output.
+        """
+        report = self.coordinator.delta_t
+        if report is None:
+            return {"evaluated": False}
+        attributes = dict(report.as_dict())
+        attributes["evaluated"] = True
+        return attributes
+
+
+class DeltaTQualitySensor(_SystemDiagnosticSensor):
+    """Worst probe quality behind the current ΔT (``PROBE_*``).
+
+    Diagnostic: it grades the *instrumentation*, which is troubleshooting
+    evidence rather than a reading of the house.
+
+    All five ``PROBE_QUALITIES`` values are published verbatim
+    (docs/INTERFACES_V0.3.md section 3). One of them, ``PROBE_UNAVAILABLE``, was
+    formerly the literal ``"unavailable"``, which Home Assistant reserves for a
+    broken entity - publishing it made a healthy sensor on a probe-less
+    installation indistinguishable from a dead one. That collision was fixed at
+    the source in ``const.py`` (the value is now ``"probe_unavailable"``) and is
+    guarded by ``tests/test_contracts.py``, so this entity no longer needs to
+    work around it.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = PROBE_QUALITIES
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "delta_t_quality")
+        self._attr_translation_key = "delta_t_quality"
+
+    @property
+    def native_value(self) -> str | None:
+        report = self.coordinator.delta_t
+        quality = None if report is None else report.quality
+        # Never publish a value the enum translation cannot render.
+        if quality not in PROBE_QUALITIES:
+            return None
+        return quality
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        report = self.coordinator.delta_t
+        pair = self.coordinator.probes
+        if report is None:
+            return {"evaluated": False}
+        attributes: dict[str, Any] = {
+            "evaluated": True,
+            "samples": report.samples,
+            "reason_codes": list(report.reason_codes),
+        }
+        if pair is not None:
+            attributes["supply_quality"] = pair.supply.quality
+            attributes["return_quality"] = pair.return_.quality
+            attributes["both_usable"] = pair.both_usable
+            attributes["divergence"] = pair.divergence
+        return attributes
+
+
+class CondensingRegimeSensor(_SystemDiagnosticSensor):
+    """Whether the return temperature suggests a condensing regime.
+
+    An **indirect** indicator from return temperature only; it is not an
+    efficiency measurement (design doc 12, V0.3 delivery standard).
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = CONDENSING_REGIMES
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "condensing_regime")
+        self._attr_translation_key = "condensing_regime"
+
+    @property
+    def native_value(self) -> str | None:
+        report = self.coordinator.delta_t
+        regime = None if report is None else report.condensing
+        return regime if regime in CONDENSING_REGIMES else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        report = self.coordinator.delta_t
+        if report is None:
+            return {"evaluated": False}
+        return {
+            "evaluated": True,
+            "is_power_measurement": False,
+            "stable_seconds": report.stable_seconds,
+            "samples": report.samples,
+            "reason_codes": list(report.reason_codes),
+        }
+
+
+class HydraulicVerdictSensor(_SystemDiagnosticSensor):
+    """Indirect hydraulic reading from the settled ΔT (``HYDRAULIC_*``).
+
+    A low ΔT on a fixed-speed pump usually means **excessive flow or a bypass
+    short-circuit**, and a high ΔT means **insufficient flow**. Both are
+    hydraulic signals, not "good/bad efficiency", which is why the verdict is
+    worded that way and never as a performance score.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = HYDRAULIC_VERDICTS
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "hydraulic_verdict")
+        self._attr_translation_key = "hydraulic_verdict"
+
+    @property
+    def native_value(self) -> str | None:
+        report = self.coordinator.delta_t
+        verdict = None if report is None else report.hydraulic
+        return verdict if verdict in HYDRAULIC_VERDICTS else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        report = self.coordinator.delta_t
+        if report is None:
+            return {"evaluated": False}
+        return {
+            "evaluated": True,
+            "delta_t": report.delta_t,
+            "average": report.average,
+            "minimum": report.minimum,
+            "maximum": report.maximum,
+            "trend_per_hour": report.trend_per_hour,
+            "stable_seconds": report.stable_seconds,
+            "samples": report.samples,
+            "is_power_measurement": False,
+            "reason_codes": list(report.reason_codes),
+        }
+
+
+class CurveCalibrationAdviceSensor(_SystemDiagnosticSensor):
+    """Advisory only: what to consider doing to the weather curve.
+
+    The curve belongs to the user's configuration and is **never** changed
+    automatically - this entity is a suggestion they may act on (design doc 7,
+    V0.3: calibrate the weather-compensation parameters from real data, advice
+    only, never applied automatically).
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = CALIBRATION_ADVICE
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "curve_calibration_advice")
+        self._attr_translation_key = "curve_calibration_advice"
+
+    @property
+    def native_value(self) -> str | None:
+        report = self.coordinator.delta_t
+        advice = None if report is None else report.calibration
+        return advice if advice in CALIBRATION_ADVICE else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        report = self.coordinator.delta_t
+        if report is None:
+            return {"evaluated": False}
+        return {
+            "evaluated": True,
+            "advisory_only": True,
+            "stable_seconds": report.stable_seconds,
+            "samples": report.samples,
+            "quality": report.quality,
+            "reason_codes": list(report.reason_codes),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Zone level
 # ---------------------------------------------------------------------------
 
@@ -771,6 +1085,12 @@ async def async_setup_entry(
         Combinations24hSensor(coordinator),
         CyclingQualitySensor(coordinator),
         UnexplainedBurns24hSensor(coordinator),
+        ReturnTemperatureSensor(coordinator),
+        DeltaTSensor(coordinator),
+        DeltaTQualitySensor(coordinator),
+        CondensingRegimeSensor(coordinator),
+        HydraulicVerdictSensor(coordinator),
+        CurveCalibrationAdviceSensor(coordinator),
     ]
 
     for zone_id in coordinator.zone_ids:

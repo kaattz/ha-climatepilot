@@ -192,16 +192,64 @@ def run(coro: Any) -> Any:
 # ---------------------------------------------------------------------------
 # menu + zone selection
 # ---------------------------------------------------------------------------
-def test_init_shows_the_four_menus() -> None:
+def test_init_shows_every_top_level_menu() -> None:
+    """The init menu must mirror ``MENU_OPTIONS`` exactly, in order.
+
+    Derived from the module constant rather than a hardcoded list: the V0.2
+    version spelled the four entries out and silently went stale when V0.3
+    added ``probes``. Order is asserted too because the menu is a user-facing
+    sequence.
+    """
     flow = make_options_flow(entry_with(), build_hass())
     result = run(render(flow, of.STEP_INIT))
     assert result["type"] == "menu"
-    assert result["menu_options"] == [
+    assert result["menu_options"] == of.MENU_OPTIONS
+    assert set(of.MENU_OPTIONS) == {
         of.STEP_ZONES,
         of.STEP_STRATEGIES,
         of.STEP_HEAT_SOURCE,
+        of.STEP_PROBES,
         of.STEP_DIAGNOSTICS,
-    ]
+    }
+
+
+def test_probes_step_exposes_the_v03_thresholds() -> None:
+    """The V0.3 probe step must offer every tuning key from const.py."""
+    flow = make_options_flow(entry_with(), build_hass())
+    form = run(render(flow, of.STEP_PROBES))
+    assert form["type"] == "form"
+    fields = {getattr(marker, "schema", marker) for marker in form["data_schema"].schema}
+    assert fields == {
+        "probe_stale_seconds",
+        "probe_frozen_seconds",
+        "delta_t_window_seconds",
+        "condensing_return_c",
+        "delta_t_healthy_min",
+        "delta_t_healthy_max",
+        "probe_max_divergence",
+    }
+
+
+def test_probes_step_rejects_an_inverted_healthy_band() -> None:
+    """``delta_t_healthy_min >= delta_t_healthy_max`` must be refused."""
+    flow = make_options_flow(entry_with(), build_hass())
+    result = run(
+        submit(
+            flow,
+            of.STEP_PROBES,
+            {
+                "probe_stale_seconds": 900,
+                "probe_frozen_seconds": 3600,
+                "delta_t_window_seconds": 3600,
+                "condensing_return_c": 55,
+                "delta_t_healthy_min": 15,
+                "delta_t_healthy_max": 5,
+                "probe_max_divergence": 5,
+            },
+        )
+    )
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "invalid_delta_t_range"}
 
 
 def test_options_flow_reloads_the_entry_automatically() -> None:

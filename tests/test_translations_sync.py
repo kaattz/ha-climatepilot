@@ -355,6 +355,7 @@ _KNOWN_ERROR_KEYS = {
     "invalid_curve",
     "invalid_schedule",
     "invalid_range",
+    "invalid_delta_t_range",
     "unknown",
 }
 

@@ -66,24 +66,44 @@ OUTDOOR = "sensor.heweather_outside_temperature"
 #: change mechanical instead of archaeological.
 ZONE_COUNT = 2
 EXPECTED_PER_PLATFORM = {
-    "sensor": (12, 6),
-    "binary_sensor": (2, 4),
+    "sensor": (18, 6),
+    "binary_sensor": (3, 4),
     "select": (1, 1),
     "button": (1, 1),
     "number": (1, 0),
     "switch": (0, 1),
     "climate": (1, 0),
 }
+#: System-level entity counts as each release shipped them, kept as a *record*
+#: rather than as the source of the expected total. ``EXPECTED_PER_PLATFORM``
+#: above is the current truth; these numbers exist so each release's delta can be
+#: stated and checked independently (13 + 5 + 6 = 24 system-level sensors today).
+#:
+#: Without them the deltas would have to be derived from the *live* inventory,
+#: which silently folds every later release into the earlier delta: computing
+#: "V0.2 added" as ``sensor_system - 7`` counts the V0.3 sensors too, and the
+#: arithmetic no longer means what its name says.
+V01_SYSTEM_SENSORS = 7
+V01_SYSTEM_BINARY = 2
+V01_ENTITY_TOTAL = 31
+
+V02_SYSTEM_SENSORS = 12
+V02_SYSTEM_BINARY = 2
+V02_ENTITY_TOTAL = 44
+
+#: V0.3 adds seven *system-level* entities and nothing per room: six sensors
+#: (return temperature, ΔT, and the four verdicts) plus the probe-fault flag
+#: (docs/INTERFACES_V0.3.md 4.4). Both deltas below are measured against the
+#: recorded V0.2 baseline, so they stay correct as later releases add more.
+V03_SYSTEM_SENSORS = 18
+V03_SYSTEM_BINARY = 3
+
+V02_ADDED = (V02_SYSTEM_SENSORS - V01_SYSTEM_SENSORS) + ZONE_COUNT * (
+    (EXPECTED_PER_PLATFORM["sensor"][1] - 4) + (EXPECTED_PER_PLATFORM["binary_sensor"][1] - 2)
+)
+V03_ADDED = (V03_SYSTEM_SENSORS - V02_SYSTEM_SENSORS) + (V03_SYSTEM_BINARY - V02_SYSTEM_BINARY)
 EXPECTED_ENTITY_TOTAL = sum(
     system + ZONE_COUNT * per_zone for system, per_zone in EXPECTED_PER_PLATFORM.values()
-)
-#: V0.1 shipped 31 for this same installation: 13 system-level + 2 zones x 9.
-#: V0.2 adds five system-level sensors and four entities per room. Kept as a
-#: named constant (not inlined into the total) so a future V0.3 extends this sum
-#: instead of rewriting the one number that records what V0.1 actually shipped.
-V01_ENTITY_TOTAL = 31
-V02_ADDED = (EXPECTED_PER_PLATFORM["sensor"][0] - 7) + ZONE_COUNT * (
-    (EXPECTED_PER_PLATFORM["sensor"][1] - 4) + (EXPECTED_PER_PLATFORM["binary_sensor"][1] - 2)
 )
 
 
@@ -325,10 +345,17 @@ async def test_expected_entities_are_registered(hass):
     suffixes = {eid.split(".", 1)[1] for eid in ids}
     assert len(ids) == EXPECTED_ENTITY_TOTAL, (
         f"expected {EXPECTED_ENTITY_TOTAL} entities for {ZONE_COUNT} zones "
-        f"(V0.1's {V01_ENTITY_TOTAL} + {V02_ADDED} V0.2 additions), "
+        f"(V0.1's {V01_ENTITY_TOTAL} + {V02_ADDED} V0.2 additions + "
+        f"{V03_ADDED} V0.3 additions), "
         f"got {len(ids)}: {sorted(ids)}"
     )
-    assert EXPECTED_ENTITY_TOTAL == V01_ENTITY_TOTAL + V02_ADDED
+    assert EXPECTED_ENTITY_TOTAL == V01_ENTITY_TOTAL + V02_ADDED + V03_ADDED
+    # The V0.3 delta is system-level only, so it must not scale with room count.
+    assert V03_ADDED == 7
+    assert V01_ENTITY_TOTAL + V02_ADDED == V02_ENTITY_TOTAL
+    # The recorded baselines must agree with the live inventory they describe.
+    assert EXPECTED_PER_PLATFORM["sensor"][0] == V03_SYSTEM_SENSORS
+    assert EXPECTED_PER_PLATFORM["binary_sensor"][0] == V03_SYSTEM_BINARY
 
     for suffix in (
         "control_mode",
@@ -605,6 +632,120 @@ async def test_reload_restores_live_states(hass):
     ids = registered_entities(hass)
     unavailable = [eid for eid in ids if (s := hass.states.get(eid)) and s.state == "unavailable"]
     assert not unavailable, f"still unavailable after reload: {unavailable}"
+
+
+async def test_ds18b20_sentinel_chain_end_to_end(hass):
+    """The full 85 °C sentinel chain, on a live entry.
+
+    Every link of this path was already covered - the probe engine has its own
+    sentinel tests, and the coordinator has doubles for a rejected reading - but
+    the *chain* was not: a probe entity reporting 85.0 had never been walked
+    through a real coordinator cycle into the published entity states.
+
+    That gap matters because each link can be individually right while a seam
+    between them is wrong: the read could keep the raw value, the monitor could
+    accept it, the delta-T engine could receive a number, or the entity could
+    publish the rejected value anyway. DS18B20 reports exactly 85 °C when its
+    conversion fails, so a leak anywhere turns "broken probe" into either a
+    fabricated boiler fault or an enormous delta-T that looks like success.
+    """
+    from custom_components.climatepilot.const import DS18B20_ERROR_C
+
+    supply_pipe = "sensor.supply_pipe_temperature"
+    return_pipe = "sensor.return_pipe_temperature"
+    hass.states.async_set(
+        supply_pipe,
+        "45.0",
+        {"device_class": "temperature", "unit_of_measurement": "°C"},
+    )
+    hass.states.async_set(
+        return_pipe,
+        "38.0",
+        {"device_class": "temperature", "unit_of_measurement": "°C"},
+    )
+
+    entry = await setup_entry(
+        hass,
+        supply_probe_entity=supply_pipe,
+        return_temp_entity=return_pipe,
+    )
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    from homeassistant.helpers import entity_registry
+
+    registry = entity_registry.async_get(hass)
+    ids = {
+        e.translation_key: e.entity_id for e in registry.entities.values() if e.platform == DOMAIN
+    }
+
+    def state_of(key: str) -> str | None:
+        state = hass.states.get(ids[key])
+        return state.state if state else None
+
+    # --- A. a healthy pair flows all the way through ---------------------
+    await coordinator.async_refresh()
+    assert coordinator.probes.both_usable is True
+    assert coordinator.delta_t.delta_t == pytest.approx(7.0, abs=0.01)
+    assert float(state_of("delta_t")) == pytest.approx(7.0, abs=0.01)
+    assert state_of("probe_fault") == "off"
+
+    # --- B. the probe now sits exactly on the sentinel -------------------
+    hass.states.async_set(
+        supply_pipe,
+        str(DS18B20_ERROR_C),
+        {"device_class": "temperature", "unit_of_measurement": "°C"},
+    )
+    await coordinator.async_refresh()
+
+    assessment = coordinator.probes.supply
+    assert assessment.quality == "implausible"
+    assert assessment.value is None, "the sentinel must not survive as a value"
+    assert "probe_sentinel_value_85c" in assessment.reason_codes
+
+    # Nothing downstream may see a number.
+    assert coordinator.delta_t.delta_t is None
+    assert state_of("delta_t") == "unknown", "the fabricated delta-T leaked"
+    assert state_of("probe_fault") == "on"
+    assert state_of("delta_t_quality") == "probe_unavailable"
+
+    # --- C. and it recovers when the probe does --------------------------
+    hass.states.async_set(
+        supply_pipe,
+        "45.0",
+        {"device_class": "temperature", "unit_of_measurement": "°C"},
+    )
+    await coordinator.async_refresh()
+    assert coordinator.probes.supply.quality == "valid"
+    assert coordinator.probes.supply.value == pytest.approx(45.0)
+    assert state_of("probe_fault") == "off", "the fault must clear, not latch"
+
+
+async def test_no_probes_configured_is_not_a_fault(hass):
+    """Most installations have no external probes; that must not read as broken.
+
+    A permanently asserted ``probe_fault`` on a system that simply has no probes
+    would train the user to ignore the flag, and a missing reading must not be
+    rendered as a plausible 0 °C.
+    """
+    from homeassistant.helpers import entity_registry
+
+    entry = await setup_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator.async_refresh()
+
+    registry = entity_registry.async_get(hass)
+    ids = {
+        e.translation_key: e.entity_id for e in registry.entities.values() if e.platform == DOMAIN
+    }
+
+    assert coordinator.probes_configured is False
+    assert coordinator.probe_fault is False
+    assert hass.states.get(ids["probe_fault"]).state == "off"
+
+    for key in ("return_temperature", "delta_t"):
+        state = hass.states.get(ids[key])
+        assert state.state == "unknown", (key, state.state)
+        assert state.state not in ("unavailable", "0", "0.0")
 
 
 async def test_setup_survives_missing_entities(hass):

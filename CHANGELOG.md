@@ -13,6 +13,92 @@ ClimatePilot（智暖领航）的全部重要变更都记录在此。
 
 ---
 
+## [0.3.0] — 2026-10-11
+
+> **部署状态：未部署到实机，未经现场验证。**
+>
+> 本版本的全部代码与文档都只在开发环境中完成并通过自动化测试，
+> **尚未在真实采暖系统上运行过，也尚未在真实 DS18B20 探头上验证过**。
+> 探头阈值（过期/卡死判定、健康 ΔT 区间、冷凝判据）均为**设计建议值**，
+> 需要在你的系统上实测标定后才谈得上可信。
+>
+> **安全边界（本版本的核心）：**
+> **外贴探头属于监测与优化输入，不承担任何锅炉安全停机功能。**
+> 探头损坏、断线、读数异常**不会**改变集成的任何写入决策 ——
+> 锅炉的最小流量保护、过热保护与防冻逻辑始终由锅炉自身的硬件与原生程序负责。
+> 若你打算用探头读数触发任何保护动作，**请在锅炉/ KNX 侧独立实现**，
+> 不要依赖本集成。
+
+### Added
+
+- **探头可用性与偏差检测**（`probe_monitor.py`，纯引擎）：把一路原始读数判为
+  `valid` / `stale` / `implausible` / `frozen` / `unavailable`，并给出原因码。
+  判定顺序固定：缺失 → **85℃ 哨兵** → 越界 → 过期 → 卡死（**仅燃烧时**）。
+- **DS18B20 哨兵识别**：DS18B20 在转换失败或总线断开时报出的**恰好是 85℃**。
+  集成将其判为 `implausible` 而**不是**"一根很热的管子"——否则会凭空报出不存在的
+  锅炉故障，或算出一个看起来很成功、其实毫无意义的"巨大 ΔT"。
+- **供回水对偶校验**（`probe_monitor.assess_pair`）：两路探头互相印证；
+  偏差超过 `max_divergence` 时**两路都降为 `implausible`**（无法判断哪一路错了，
+  因此两路都不可信）。**任一探头不可用时差值恒为 `None`**，
+  绝不用单边读数凑一个差值。
+- **ΔT 趋势 / 冷凝工况 / 水力判定 / 曲线校准建议**（`delta_t_diagnostics.py`，纯引擎）：
+  滚动窗口内的 ΔT 统计与趋势，输出四个带质量标签的结论。
+- **7 个新实体**（translation_key 与英文名逐字冻结，见 `INTERFACES_V0.3.md` 第 3 节）：
+  - 系统级 sensor：`return_temperature`、`delta_t`、`delta_t_quality`、
+    `condensing_regime`、`hydraulic_verdict`、`curve_calibration_advice`
+  - 系统级 binary_sensor：`probe_fault`
+  - 实体总数由 44 增至 **51**（2 房间时）。
+- **中英文翻译**：新增 7 个实体名，并为 4 个枚举型 state 补全状态翻译
+  （共 17 个状态码），否则 UI 会直接显示原始英文码。
+- **`docs/DEPLOYMENT.md` 第 7.5 节**：探头安装要求、85℃ 哨兵的读法、
+  怎么读 ΔT、以及每个 `hydraulic_verdict` / `curve_calibration_advice` 取值的处置建议。
+- **配置流程**：`boiler` 步骤新增两个**可选**外贴探头选择器；选项流程暴露
+  探头与 ΔT 阈值，并校验 `delta_t_healthy_min < delta_t_healthy_max`。
+
+### Changed
+
+- `manifest.json` 版本号 `0.2.0` → `0.3.0`。
+- `coordinator.py` 每周期刷新 `probes` / `delta_t` / `probe_fault`；
+  诊断快照新增 `probes` 与 `delta_t` 两个键。
+- README 实体表（+7）、V0.3 章节、路线图与版本引用同步更新。
+- V0.1/V0.2 的既有实体、服务与配置键**不改名、不删除**。
+
+### Fixed
+
+- 无用户可见缺陷修复。本版本新增的全部是**只读诊断**，
+  不改变 V0.1/V0.2 的任何控制行为。
+
+### 安全边界（本版本新增）
+
+- **ΔT 不是热功率。** 供回水温差**不能**用来推算真实热效率或热输出。
+  ΔT 只是流动与冷凝工况的**间接**指标；所有诊断输出都带
+  `is_power_measurement = False` 标记与 `REASON_NOT_A_POWER_MEASUREMENT` 原因码。
+- **`curve_calibration_advice` 是纯建议。** 集成**不会**自动修改天气补偿曲线 ——
+  曲线由用户在配置中持有，任何调整都必须由用户显式执行。
+- **文档明确区分「工况标签」与「物理成因」。** `hydraulic_verdict` 的
+  `low_flow` / `high_flow` 是**低/高 ΔT 工况**的标签，**不是**"流量太小/太大"的
+  判断 —— 低 ΔT 通常意味着流量**偏大**或旁通短路，高 ΔT 才意味着流量不足。
+  按字面把 `high_flow` 读成"流量太大"去关小循环泵，会把已经流量不足的系统调得更糟。
+  `docs/DEPLOYMENT.md` 第 7.5.5 节给出「键名 → 物理含义 → 通常成因 → 建议动作」对照表。
+- **`curve_calibration_advice` 是纯建议，集成不会自动改曲线。**
+  曲线由用户在配置中持有；用户需自己去 options 里调整。触发依据是
+  窗口内是否存在欠温 / 过热房间证据。
+- **探头失联不影响核心采暖控制。** 探头故障只降低诊断的可信度，
+  不改变房间目标、不改变锅炉启停、不改变供水温度。
+- **探头未配置 ≠ 实体故障。** 未装探头时 `return_temperature` / `delta_t`
+  返回 `unknown` 但实体仍 `available`，`probe_fault` 保持 off ――
+  多数安装根本没有外贴探头，常亮一个故障位只会训练用户忽略它。
+- **探头质量 `probe_unavailable` 有意避开 HA 保留字面量。**
+  `unavailable` 是 `homeassistant.const.STATE_UNAVAILABLE`：任何实体发布它，
+  Home Assistant 会渲染成**真正的"实体不可用"**（灰掉，与集成坏掉无法区分）。
+  若用它表示"探头没读数"，`delta_t_quality` 在探头缺失时就永远显示为
+  "ClimatePilot 坏了"，恰好抹掉这个传感器存在的意义。
+  因此该取值定为 `probe_unavailable`（UI 显示"无探头读数"）。
+  相对地，`unknown` 一族（冷凝工况 / 水力判定）**有意保持** `unknown` ——
+  其语义是"实体可用、值未确定"，正是那些判定想表达的。
+
+---
+
 ## [0.2.0] — 2026-10-11
 
 > **部署状态：未部署到实机，未经现场验证。**
@@ -112,6 +198,7 @@ ClimatePilot（智暖领航）的全部重要变更都记录在此。
 
 ---
 
-[未发布]: https://github.com/kaattz/ha-climatepilot/compare/v0.2.0...HEAD
+[未发布]: https://github.com/kaattz/ha-climatepilot/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kaattz/ha-climatepilot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kaattz/ha-climatepilot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kaattz/ha-climatepilot/releases/tag/v0.1.0

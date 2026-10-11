@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
+from homeassistant.components.sensor import SensorDeviceClass
 from homeassistant.util import slugify
 
 from custom_components.climatepilot import (
@@ -44,6 +45,7 @@ from custom_components.climatepilot.binary_sensor import (
     HeatRequestBinarySensor,
     ManualOverrideBinarySensor,
     OverheatingBinarySensor,
+    ProbeFaultBinarySensor,
     ShortCycleAlertBinarySensor,
     UnderheatingBinarySensor,
 )
@@ -52,10 +54,14 @@ from custom_components.climatepilot.const import (
     ADVICE_LOWER_SUPPLY,
     ADVICE_NONE,
     ADVICE_RAISE_SUPPLY,
+    CALIBRATION_INSUFFICIENT_DATA,
+    CALIBRATION_RAISE_CURVE,
     COMFORT_OK,
     COMFORT_OVERHEATING,
     COMFORT_UNDERHEATING,
     COMFORT_UNKNOWN,
+    CONDENSING_LIKELY,
+    CONDENSING_UNKNOWN,
     CONF_ZONE_ID,
     CONTROL_MODE_COORDINATE,
     CONTROL_MODE_OBSERVE,
@@ -67,6 +73,13 @@ from custom_components.climatepilot.const import (
     FSM_IDLE,
     HVAC_ACTION_HEATING,
     HVAC_ACTION_IDLE,
+    HYDRAULIC_OK,
+    HYDRAULIC_UNKNOWN,
+    PROBE_IMPLAUSIBLE,
+    PROBE_QUALITIES,
+    PROBE_STALE,
+    PROBE_UNAVAILABLE,
+    PROBE_VALID,
     QUALITY_FAIR,
     QUALITY_GOOD,
     QUALITY_POOR,
@@ -92,13 +105,19 @@ from custom_components.climatepilot.sensor import (
     Combinations24hSensor,
     ComfortAdviceSensor,
     ComfortVerdictSensor,
+    CondensingRegimeSensor,
+    CurveCalibrationAdviceSensor,
     CyclingQualitySensor,
+    DeltaTQualitySensor,
+    DeltaTSensor,
     DominantZoneCombinationSensor,
     EffectiveSetpointSensor,
     HeatingStateSensor,
+    HydraulicVerdictSensor,
     LastBurnDurationSensor,
     OutdoorTemperatureSensor,
     OverrideRemainingSensor,
+    ReturnTemperatureSensor,
     SetpointSourceSensor,
     SuggestedSupplyTempSensor,
     SupplyTemperatureSensor,
@@ -291,6 +310,165 @@ class FakeComfortVerdict:
         }
 
 
+class FakeProbeAssessment:
+    """Stand-in for ``ProbeAssessment`` (INTERFACES_V0.3.md 4.1)."""
+
+    def __init__(
+        self,
+        entity_id: str = "sensor.probe",
+        *,
+        value: float | None = 45.0,
+        quality: str = PROBE_VALID,
+        reason_codes: tuple[str, ...] = (),
+        age_seconds: float | None = 12.0,
+        frozen_seconds: float | None = None,
+    ) -> None:
+        self.entity_id = entity_id
+        self.value = value
+        self.quality = quality
+        self.reason_codes = reason_codes
+        self.age_seconds = age_seconds
+        self.frozen_seconds = frozen_seconds
+
+    @property
+    def usable(self) -> bool:
+        return self.quality == PROBE_VALID
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "entity_id": self.entity_id,
+            "value": self.value,
+            "quality": self.quality,
+            "reason_codes": list(self.reason_codes),
+            "age_seconds": self.age_seconds,
+            "frozen_seconds": self.frozen_seconds,
+        }
+
+
+class FakeProbePair:
+    """Stand-in for ``ProbePairAssessment``.
+
+    The divergence is computed here rather than passed in, mirroring the engine's
+    rule that a pair without two usable probes has **no** divergence instead of a
+    one-sided guess.
+    """
+
+    def __init__(
+        self,
+        *,
+        supply: FakeProbeAssessment | None = None,
+        return_: FakeProbeAssessment | None = None,
+        reason_codes: tuple[str, ...] = (),
+    ) -> None:
+        self.supply = supply if supply is not None else FakeProbeAssessment()
+        self.return_ = (
+            return_
+            if return_ is not None
+            else FakeProbeAssessment(entity_id="sensor.return_probe", value=37.0)
+        )
+        self.reason_codes = reason_codes
+
+    @property
+    def both_usable(self) -> bool:
+        return self.supply.usable and self.return_.usable
+
+    @property
+    def divergence(self) -> float | None:
+        if not self.both_usable:
+            return None
+        assert self.supply.value is not None and self.return_.value is not None
+        return abs(self.supply.value - self.return_.value)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "supply": self.supply.as_dict(),
+            "return": self.return_.as_dict(),
+            "divergence": self.divergence,
+            "both_usable": self.both_usable,
+            "reason_codes": list(self.reason_codes),
+        }
+
+
+def make_missing_probe_pair() -> FakeProbePair:
+    """The "no probe installed" state: both sides unavailable, values ``None``."""
+    return FakeProbePair(
+        supply=FakeProbeAssessment(entity_id="", value=None, quality=PROBE_UNAVAILABLE),
+        return_=FakeProbeAssessment(entity_id="", value=None, quality=PROBE_UNAVAILABLE),
+    )
+
+
+class FakeDeltaTReport:
+    """Stand-in for ``DeltaTReport`` (INTERFACES_V0.3.md 4.2).
+
+    ``is_power_measurement`` is hardcoded ``False`` exactly as the real engine
+    does, so a sensor that stops publishing the marker fails here.
+    """
+
+    def __init__(
+        self,
+        *,
+        delta_t: float | None = 8.0,
+        average: float | None = 7.8,
+        minimum: float | None = 7.1,
+        maximum: float | None = 8.6,
+        trend_per_hour: float | None = 0.3,
+        stable_seconds: float = 1800.0,
+        samples: int = 30,
+        quality: str = PROBE_VALID,
+        condensing: str = CONDENSING_LIKELY,
+        hydraulic: str = HYDRAULIC_OK,
+        calibration: str = CALIBRATION_RAISE_CURVE,
+        reason_codes: tuple[str, ...] = ("temperature_difference_is_not_heat_power",),
+    ) -> None:
+        self.delta_t = delta_t
+        self.average = average
+        self.minimum = minimum
+        self.maximum = maximum
+        self.trend_per_hour = trend_per_hour
+        self.stable_seconds = stable_seconds
+        self.samples = samples
+        self.quality = quality
+        self.condensing = condensing
+        self.hydraulic = hydraulic
+        self.calibration = calibration
+        self.reason_codes = reason_codes
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "delta_t": self.delta_t,
+            "average": self.average,
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+            "trend_per_hour": self.trend_per_hour,
+            "stable_seconds": self.stable_seconds,
+            "samples": self.samples,
+            "quality": self.quality,
+            "condensing": self.condensing,
+            "hydraulic": self.hydraulic,
+            "calibration": self.calibration,
+            "reason_codes": list(self.reason_codes),
+            "is_power_measurement": False,
+        }
+
+
+def make_empty_delta_t_report() -> FakeDeltaTReport:
+    """What the real engine returns with no probes: everything unknown."""
+    return FakeDeltaTReport(
+        delta_t=None,
+        average=None,
+        minimum=None,
+        maximum=None,
+        trend_per_hour=None,
+        stable_seconds=0.0,
+        samples=0,
+        quality=PROBE_UNAVAILABLE,
+        condensing=CONDENSING_UNKNOWN,
+        hydraulic=HYDRAULIC_UNKNOWN,
+        calibration=CALIBRATION_INSUFFICIENT_DATA,
+        reason_codes=("temperature_difference_is_not_heat_power", "probe_not_configured"),
+    )
+
+
 class FakeWeather:
     """Stand-in for ``WeatherCompensator``."""
 
@@ -319,6 +497,10 @@ class FakeCoordinator:
         capabilities: object | None = None,
         combinations: object = UNSET,
         comfort: dict[str, object] | None = None,
+        probes: object = UNSET,
+        delta_t: object = UNSET,
+        probe_fault: bool = False,
+        probes_configured: bool = True,
     ) -> None:
         self.system_id = ENTRY_ID
         self.name = "智暖领航"
@@ -389,6 +571,14 @@ class FakeCoordinator:
         # The analyser is what tells a comfort flag how long a fault must last;
         # a double without it proves the flag degrades instead of guessing.
         self.comfort_analyser = SimpleNamespace(overheat_dwell=1800.0, underheat_dwell=3600.0)
+
+        # --- V0.3 surfaces (INTERFACES_V0.3.md 4.3) -----------------------
+        # ``probes=None`` / ``delta_t=None`` are meaningful states ("not
+        # evaluated yet"), so the sentinel decides whether the caller overrode.
+        self.probes = FakeProbePair() if probes is UNSET else probes
+        self.delta_t = FakeDeltaTReport() if delta_t is UNSET else delta_t
+        self.probe_fault = probe_fault
+        self.probes_configured = probes_configured
 
         # Commands the platform layer is allowed to call.
         self.async_set_control_mode = AsyncMock()
@@ -487,8 +677,8 @@ def assert_translation_key(platform: str, key: str) -> None:
 #: is created by ``climate.py`` through a different path (``test_integration_setup``
 #: counts it).
 EXPECTED_PER_PLATFORM: dict[str, tuple[int, int]] = {
-    "sensor": (12, 6),
-    "binary_sensor": (2, 4),
+    "sensor": (18, 6),
+    "binary_sensor": (3, 4),
     "select": (1, 1),
     "button": (1, 1),
     "number": (1, 0),
@@ -521,10 +711,17 @@ def build_platform_entities(coordinator: FakeCoordinator) -> dict[str, list]:
             Combinations24hSensor(coordinator),
             CyclingQualitySensor(coordinator),
             UnexplainedBurns24hSensor(coordinator),
+            ReturnTemperatureSensor(coordinator),
+            DeltaTSensor(coordinator),
+            DeltaTQualitySensor(coordinator),
+            CondensingRegimeSensor(coordinator),
+            HydraulicVerdictSensor(coordinator),
+            CurveCalibrationAdviceSensor(coordinator),
         ],
         "binary_sensor": [
             ShortCycleAlertBinarySensor(coordinator),
             DegradedBinarySensor(coordinator),
+            ProbeFaultBinarySensor(coordinator),
         ],
         "select": [ControlModeSelect(coordinator)],
         "button": [ReassessButton(coordinator)],
@@ -684,6 +881,12 @@ def test_expected_translation_key_set() -> None:
         "override_remaining",
         "comfort_verdict",
         "comfort_advice",
+        "return_temperature",
+        "delta_t",
+        "delta_t_quality",
+        "condensing_regime",
+        "hydraulic_verdict",
+        "curve_calibration_advice",
     }
     assert keys["binary_sensor"] == {
         "manual_override",
@@ -692,6 +895,7 @@ def test_expected_translation_key_set() -> None:
         "heat_request",
         "overheating",
         "underheating",
+        "probe_fault",
     }
     assert keys["button"] == {"resume_auto", "reassess"}
     assert keys["number"] == {"supply_temperature_override"}
@@ -743,27 +947,351 @@ def test_v02_entity_categories_split_explanations_from_readings() -> None:
     the *boiler*; the dominant combination, the combination count and both
     comfort entities describe the house and are meant to be on the dashboard,
     where an entity category would hide them behind the diagnostic filter.
+
+    V0.3 follows the same split (INTERFACES_V0.3.md 4.4): the four *verdicts*
+    (``delta_t_quality`` / ``condensing_regime`` / ``hydraulic_verdict`` /
+    ``curve_calibration_advice``) are diagnostic, while the two readings
+    (``return_temperature`` / ``delta_t``) and the ``probe_fault`` flag stay
+    visible - a probe that fell off the pipe is something to see, not to file.
     """
     from homeassistant.helpers.entity import EntityCategory
 
-    diagnostic = {"combinations_24h", "cycling_quality", "unexplained_burns_24h"}
+    diagnostic = {
+        "combinations_24h",
+        "cycling_quality",
+        "unexplained_burns_24h",
+        "delta_t_quality",
+        "condensing_regime",
+        "hydraulic_verdict",
+        "curve_calibration_advice",
+    }
     user_facing = {
         "dominant_zone_combination",
         "zone_combination_count",
         "comfort_verdict",
         "comfort_advice",
+        "return_temperature",
+        "delta_t",
     }
-    flags = {"overheating", "underheating"}
+    flags = {"overheating", "underheating", "probe_fault"}
 
     coordinator = FakeCoordinator(compensation=FakeCompensation())
     entities = build_platform_entities(coordinator)
 
+    seen: set[str] = set()
     for entity in [*entities["sensor"], *entities["binary_sensor"]]:
         key = entity.translation_key
+        seen.add(key)
         if key in diagnostic:
             assert entity.entity_category is EntityCategory.DIAGNOSTIC, key
         elif key in user_facing | flags:
             assert entity.entity_category is None, key
+
+    # No key may be silently uncategorised by this test: every V0.3 addition must
+    # appear in exactly one of the three sets above.
+    assert diagnostic | user_facing | flags <= seen
+
+
+# ---------------------------------------------------------------------------
+# V0.3 system-level probe and delta-T entities
+# ---------------------------------------------------------------------------
+
+
+def test_v03_translation_keys_are_implemented_verbatim() -> None:
+    """The V0.3 keys are a frozen contract (INTERFACES_V0.3.md section 3).
+
+    All seven are system-level, so each must appear exactly once regardless of
+    how many rooms are configured - a per-zone duplicate would silently change
+    the entity count the setup tests assert.
+    """
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entities = build_platform_entities(coordinator)
+
+    sensor_keys = {entity.translation_key for entity in entities["sensor"]}
+    binary_keys = {entity.translation_key for entity in entities["binary_sensor"]}
+
+    for key in (
+        "return_temperature",
+        "delta_t",
+        "delta_t_quality",
+        "condensing_regime",
+        "hydraulic_verdict",
+        "curve_calibration_advice",
+    ):
+        assert key in sensor_keys, key
+        assert sum(1 for e in entities["sensor"] if e.translation_key == key) == 1, key
+    assert "probe_fault" in binary_keys
+    assert sum(1 for e in entities["binary_sensor"] if e.translation_key == "probe_fault") == 1
+
+
+def test_return_temperature_maps_the_probe_value() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = ReturnTemperatureSensor(coordinator)
+    assert entity.native_value == 37.0
+    assert entity.device_class is SensorDeviceClass.TEMPERATURE
+
+    attributes = entity.extra_state_attributes
+    assert attributes["evaluated"] is True
+    assert attributes["divergence"] == 8.0
+    assert attributes["both_usable"] is True
+
+
+def test_return_temperature_is_unknown_without_a_probe_but_still_available() -> None:
+    """``None`` state, ``available`` True: "not fitted" is not "broken"."""
+    coordinator = FakeCoordinator(
+        compensation=FakeCompensation(),
+        probes=make_missing_probe_pair(),
+        delta_t=make_empty_delta_t_report(),
+        probes_configured=False,
+    )
+    entity = ReturnTemperatureSensor(coordinator)
+    assert entity.native_value is None
+    assert entity.available is True, "an unconfigured probe must not look broken"
+
+
+def test_return_temperature_hides_an_implausible_probe_value() -> None:
+    """A rejected reading must not be published as a pipe temperature.
+
+    The DS18B20 85 °C sentinel is the dangerous case: it reads like a very hot
+    return pipe, so the engine reports ``value=None`` with quality
+    ``implausible`` and the entity must show unknown rather than 85.
+    """
+    coordinator = FakeCoordinator(
+        compensation=FakeCompensation(),
+        probes=FakeProbePair(
+            supply=FakeProbeAssessment(),
+            return_=FakeProbeAssessment(
+                entity_id="sensor.return_probe",
+                value=None,
+                quality=PROBE_IMPLAUSIBLE,
+                reason_codes=("probe_sentinel_value_85c",),
+            ),
+        ),
+    )
+    entity = ReturnTemperatureSensor(coordinator)
+    assert entity.native_value is None
+    assert entity.available is True
+    assert entity.extra_state_attributes["both_usable"] is False
+
+
+def test_delta_t_sensor_uses_the_delta_device_class() -> None:
+    """ΔT must not be ``TEMPERATURE``: that class applies an offset on conversion."""
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = DeltaTSensor(coordinator)
+
+    assert entity.native_value == 8.0
+    assert entity.device_class is SensorDeviceClass.TEMPERATURE_DELTA
+    assert entity.device_class is not SensorDeviceClass.TEMPERATURE
+
+
+def test_delta_t_sensor_publishes_the_not_a_power_measurement_marker() -> None:
+    """Design constraint: ΔT is never heat output. The marker must reach the UI."""
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    attributes = DeltaTSensor(coordinator).extra_state_attributes
+
+    assert attributes["is_power_measurement"] is False
+    assert "temperature_difference_is_not_heat_power" in attributes["reason_codes"]
+    assert attributes["average"] == 7.8
+    assert attributes["samples"] == 30
+
+
+def test_delta_t_sensor_is_unknown_without_probes() -> None:
+    coordinator = FakeCoordinator(
+        compensation=FakeCompensation(),
+        probes=make_missing_probe_pair(),
+        delta_t=make_empty_delta_t_report(),
+    )
+    entity = DeltaTSensor(coordinator)
+    assert entity.native_value is None
+    assert entity.available is True
+
+
+def test_delta_t_quality_sensor_maps_probe_constants() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = DeltaTQualitySensor(coordinator)
+
+    assert entity.native_value == PROBE_VALID
+    assert entity.options == PROBE_QUALITIES
+
+    coordinator.delta_t = FakeDeltaTReport(quality=PROBE_STALE)
+    assert entity.native_value == PROBE_STALE
+
+    # An untranslatable value must not be published.
+    coordinator.delta_t = FakeDeltaTReport(quality="not_a_quality")
+    assert entity.native_value is None
+
+
+def test_delta_t_quality_publishes_every_probe_quality_verbatim() -> None:
+    """All five ``PROBE_QUALITIES`` must be publishable as real states.
+
+    ``PROBE_UNAVAILABLE`` used to be the literal ``"unavailable"``, which Home
+    Assistant reserves for a broken entity: a healthy sensor on a probe-less
+    installation then rendered exactly like a dead one. The value is now
+    ``"probe_unavailable"`` (fixed in ``const.py``, guarded by
+    ``tests/test_contracts.py``), so this entity publishes the code verbatim as
+    the frozen contract in INTERFACES_V0.3.md section 3 requires.
+    """
+    from homeassistant.const import STATE_UNAVAILABLE
+
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = DeltaTQualitySensor(coordinator)
+
+    assert PROBE_UNAVAILABLE != STATE_UNAVAILABLE, (
+        "PROBE_UNAVAILABLE must not collide with the reserved HA state"
+    )
+    for quality in PROBE_QUALITIES:
+        coordinator.delta_t = FakeDeltaTReport(quality=quality)
+        assert entity.native_value == quality
+
+    # The probe-less installation is the common case: it must stay *available*
+    # and publish a real, translatable state rather than looking broken.
+    coordinator.probes = make_missing_probe_pair()
+    coordinator.delta_t = FakeDeltaTReport(quality=PROBE_UNAVAILABLE)
+    assert entity.available is True
+    assert entity.native_value == PROBE_UNAVAILABLE
+
+
+def test_delta_t_quality_reports_both_sides() -> None:
+    """The worst-side verdict must be explainable by naming both sides."""
+    coordinator = FakeCoordinator(
+        compensation=FakeCompensation(),
+        probes=FakeProbePair(
+            supply=FakeProbeAssessment(quality=PROBE_VALID),
+            return_=FakeProbeAssessment(
+                entity_id="sensor.return_probe", value=None, quality=PROBE_STALE
+            ),
+        ),
+        delta_t=FakeDeltaTReport(quality=PROBE_STALE),
+    )
+    attributes = DeltaTQualitySensor(coordinator).extra_state_attributes
+    assert attributes["supply_quality"] == PROBE_VALID
+    assert attributes["return_quality"] == PROBE_STALE
+    assert attributes["both_usable"] is False
+    assert attributes["divergence"] is None
+
+
+def test_condensing_regime_sensor_maps_constants() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = CondensingRegimeSensor(coordinator)
+    assert entity.native_value == CONDENSING_LIKELY
+
+    coordinator.delta_t = FakeDeltaTReport(condensing=CONDENSING_UNKNOWN)
+    assert entity.native_value == CONDENSING_UNKNOWN
+
+    coordinator.delta_t = FakeDeltaTReport(condensing="bogus")
+    assert entity.native_value is None
+
+
+def test_hydraulic_verdict_sensor_maps_constants() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = HydraulicVerdictSensor(coordinator)
+    assert entity.native_value == HYDRAULIC_OK
+
+    coordinator.delta_t = FakeDeltaTReport(hydraulic=HYDRAULIC_UNKNOWN)
+    assert entity.native_value == HYDRAULIC_UNKNOWN
+    # The explanation survives even when the verdict is unknown.
+    assert entity.extra_state_attributes["stable_seconds"] == 1800.0
+
+
+def test_curve_calibration_advice_is_advisory_only() -> None:
+    """The curve belongs to the user; the entity must say it never applies it."""
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = CurveCalibrationAdviceSensor(coordinator)
+
+    assert entity.native_value == CALIBRATION_RAISE_CURVE
+    assert entity.extra_state_attributes["advisory_only"] is True
+
+    coordinator.delta_t = FakeDeltaTReport(calibration=CALIBRATION_INSUFFICIENT_DATA)
+    assert entity.native_value == CALIBRATION_INSUFFICIENT_DATA
+
+
+def test_v03_verdict_sensors_are_unknown_not_zero_before_evaluation() -> None:
+    """Before the first cycle the coordinator has no report; show unknown."""
+    coordinator = FakeCoordinator(compensation=FakeCompensation(), probes=None, delta_t=None)
+    for entity in (
+        ReturnTemperatureSensor(coordinator),
+        DeltaTSensor(coordinator),
+        DeltaTQualitySensor(coordinator),
+        CondensingRegimeSensor(coordinator),
+        HydraulicVerdictSensor(coordinator),
+        CurveCalibrationAdviceSensor(coordinator),
+    ):
+        assert entity.native_value is None, entity.translation_key
+        assert entity.extra_state_attributes["evaluated"] is False
+
+
+def test_probe_fault_is_off_when_no_probe_is_configured() -> None:
+    """The most important semantic: no probe is not a fault.
+
+    A permanently-on flag would train the user to ignore it, so an installation
+    with no external probes must read ``off``.
+    """
+    coordinator = FakeCoordinator(
+        compensation=FakeCompensation(),
+        probes=make_missing_probe_pair(),
+        probe_fault=False,
+        probes_configured=False,
+    )
+    entity = ProbeFaultBinarySensor(coordinator)
+
+    assert entity.is_on is False
+    assert entity.extra_state_attributes["configured"] is False
+    assert entity.extra_state_attributes["affects_heating"] is False
+
+
+def test_probe_fault_is_on_when_a_configured_probe_fails() -> None:
+    coordinator = FakeCoordinator(
+        compensation=FakeCompensation(),
+        probes=FakeProbePair(
+            supply=FakeProbeAssessment(quality=PROBE_VALID),
+            return_=FakeProbeAssessment(
+                entity_id="sensor.return_probe",
+                value=None,
+                quality=PROBE_UNAVAILABLE,
+                reason_codes=("probe_not_configured",),
+            ),
+        ),
+        probe_fault=True,
+        probes_configured=True,
+    )
+    entity = ProbeFaultBinarySensor(coordinator)
+
+    assert entity.is_on is True
+    assert entity.extra_state_attributes["configured"] is True
+    assert entity.extra_state_attributes["return_quality"] == PROBE_UNAVAILABLE
+    # A failed probe degrades diagnostics only - never the heating.
+    assert entity.extra_state_attributes["affects_heating"] is False
+
+
+def test_probe_fault_is_not_a_diagnostic_entity() -> None:
+    """A probe off the pipe is something to see, not to file away."""
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    assert ProbeFaultBinarySensor(coordinator).entity_category is None
+
+
+def test_v03_entities_appear_once_per_system_not_per_zone() -> None:
+    """Adding rooms must not multiply the seven V0.3 entities."""
+    one = FakeCoordinator(zone_ids=("living_room",), compensation=FakeCompensation())
+    three = FakeCoordinator(compensation=FakeCompensation())
+
+    def v03_counts(coordinator: FakeCoordinator) -> dict[str, int]:
+        entities = build_platform_entities(coordinator)
+        keys = {
+            "return_temperature",
+            "delta_t",
+            "delta_t_quality",
+            "condensing_regime",
+            "hydraulic_verdict",
+            "curve_calibration_advice",
+        }
+        counts = dict.fromkeys(keys, 0)
+        for entity in [*entities["sensor"], *entities["binary_sensor"]]:
+            if entity.translation_key in counts:
+                counts[entity.translation_key] += 1
+        return counts
+
+    assert v03_counts(one) == v03_counts(three)
+    assert set(v03_counts(three).values()) == {1}
 
 
 # ---------------------------------------------------------------------------
@@ -2135,6 +2663,13 @@ class TestCoordinatorDoubleMatchesReality:
         "cycling_quality",
         "cycling_quality_reason",
         "unexplained_burns",
+        # V0.3 (docs/INTERFACES_V0.3.md 4.3). Same reasoning as above: a rename
+        # here must fail in this suite, not become a silent `unknown` on a real
+        # installation.
+        "probes",
+        "delta_t",
+        "probe_fault",
+        "probes_configured",
     )
 
     #: Methods the platform layer calls on the coordinator.
@@ -2252,6 +2787,82 @@ class TestCoordinatorDoubleMatchesReality:
         coordinator = FakeCoordinator(compensation=FakeCompensation(), burner=snapshot)
         assert BurnerStarts24hSensor(coordinator).native_value == 1
         assert LastBurnDurationSensor(coordinator).native_value == pytest.approx(200.0, abs=1.0)
+
+    def test_delta_t_report_keys_match_the_real_engine(self) -> None:
+        """Pin the ``DeltaTReport`` fields the sensors consume.
+
+        Same reasoning as the burner-snapshot check: ``v3-probe`` owns
+        ``DeltaTReport``, and a renamed field would leave the sensors silently
+        reporting ``None`` instead of failing.
+        """
+        from custom_components.climatepilot.delta_t_diagnostics import (
+            DeltaTDiagnostics,
+        )
+
+        real = DeltaTDiagnostics().report(datetime.now(UTC))
+        consumed = (
+            "delta_t",
+            "average",
+            "minimum",
+            "maximum",
+            "trend_per_hour",
+            "stable_seconds",
+            "samples",
+            "quality",
+            "condensing",
+            "hydraulic",
+            "calibration",
+            "reason_codes",
+        )
+        missing = [name for name in consumed if not hasattr(real, name)]
+        assert not missing, f"DeltaTReport lost fields: {sorted(missing)}"
+
+        # The double must carry the same surface, plus the export the entities use.
+        double = FakeDeltaTReport()
+        assert not [name for name in consumed if not hasattr(double, name)]
+        assert set(consumed) <= set(double.as_dict())
+
+        # The "never heat power" marker is a hard contract, not a convention.
+        assert real.as_dict()["is_power_measurement"] is False
+
+    def test_real_engine_with_no_probes_is_the_unknown_state(self) -> None:
+        """The real engine's no-probe output must match the double's empty state.
+
+        This is the state almost every installation will actually be in, so the
+        double may not be more optimistic than reality about it.
+        """
+        from custom_components.climatepilot.delta_t_diagnostics import (
+            DeltaTDiagnostics,
+        )
+
+        real = DeltaTDiagnostics().report(datetime.now(UTC))
+        double = make_empty_delta_t_report()
+
+        assert real.delta_t is None and double.delta_t is None
+        assert real.quality == double.quality == PROBE_UNAVAILABLE
+        assert real.condensing == double.condensing == CONDENSING_UNKNOWN
+        assert real.hydraulic == double.hydraulic == HYDRAULIC_UNKNOWN
+        assert real.calibration == double.calibration == CALIBRATION_INSUFFICIENT_DATA
+        assert real.samples == double.samples == 0
+
+        # ... and the entities built on that double show unknown, not 0.
+        coordinator = FakeCoordinator(
+            compensation=FakeCompensation(),
+            probes=make_missing_probe_pair(),
+            delta_t=double,
+        )
+        assert DeltaTSensor(coordinator).native_value is None
+        # The probe-less state is a real, translatable quality - not the reserved
+        # HA literal, so the entity stays available and readable.
+        assert DeltaTQualitySensor(coordinator).native_value == PROBE_UNAVAILABLE
+
+    def test_probe_quality_vocabulary_matches_the_real_constants(self) -> None:
+        """The enum options must be exactly the engine's ``PROBE_QUALITIES``."""
+        coordinator = FakeCoordinator(compensation=FakeCompensation())
+        options = DeltaTQualitySensor(coordinator).options
+        assert list(options) == list(PROBE_QUALITIES)
+        # Severity order is owned by the engine; the entity must not re-sort it.
+        assert options.index(PROBE_VALID) < options.index(PROBE_UNAVAILABLE)
 
 
 # ---------------------------------------------------------------------------

@@ -10,12 +10,13 @@
       },
       "boiler": {
         "title": "Heat source",
-        "description": "Select the boiler/heat-pump climate entity plus optional burner-state and supply/return temperature sensors.",
+        "description": "Select the boiler/heat-pump climate entity plus optional burner-state and supply/return temperature sensors. External pipe probes (V0.3) are monitoring-only inputs and never take over boiler safety functions.",
         "data": {
           "boiler_entity": "Heat source climate entity",
           "burner_state_entity": "Burner state sensor (optional)",
           "supply_temp_entity": "Supply temperature sensor (optional)",
-          "return_temp_entity": "Return temperature sensor (optional)"
+          "return_temp_entity": "Return temperature sensor (optional)",
+          "supply_probe_entity": "External supply pipe probe (optional)"
         }
       },
       "verify": {
@@ -87,6 +88,7 @@
           "zones": "Zones and thermostats",
           "strategies": "Temperature strategies and schedules",
           "heat_source": "Heat source and weather compensation",
+          "probes": "External probes and delta-T diagnosis",
           "diagnostics": "Diagnostics and recovery"
         }
       },
@@ -156,6 +158,19 @@
           "verify_min_flow_hydraulics": "Confirmed: hydraulics signed off"
         }
       },
+      "probes": {
+        "title": "External probes and delta-T diagnosis",
+        "description": "Thresholds for the external supply/return pipe probes. These are monitoring-only inputs: a probe fault degrades the diagnosis but never changes any write decision, and the boiler's own safety functions stay in charge. Delta-T is an indirect hydraulic/condensing indicator, NOT a power measurement.",
+        "data": {
+          "probe_stale_seconds": "Reading considered stale after (seconds)",
+          "probe_frozen_seconds": "Reading considered frozen after (seconds, only while burning)",
+          "delta_t_window_seconds": "Delta-T rolling window (seconds)",
+          "condensing_return_c": "Condensing threshold return temperature (°C)",
+          "delta_t_healthy_min": "Healthy delta-T lower bound (°C)",
+          "delta_t_healthy_max": "Healthy delta-T upper bound (°C)",
+          "probe_max_divergence": "Maximum supply/return divergence (°C)"
+        }
+      },
       "diagnostics": {
         "title": "Diagnostics and recovery",
         "description": "Short-cycle detection threshold, plus the write-protection window after a restart and the periodic consistency audit interval.",
@@ -177,6 +192,7 @@
       "invalid_schedule": "Invalid schedule. Use HH:MM=temperature separated by / or newlines.",
       "invalid_curve": "Invalid curve parameters.",
       "invalid_range": "The allowed minimum must be lower than the allowed maximum.",
+      "invalid_delta_t_range": "The healthy delta-T lower bound must be below the upper bound.",
       "unknown": "Unknown error, check the logs."
     }
   },
@@ -234,7 +250,13 @@
       "cycling_quality": {"name": "Combustion quality", "state": {"good": "Good", "fair": "Fair", "poor": "Poor", "unknown": "Unknown"}},
       "unexplained_burns_24h": {"name": "Unexplained burner starts (24 h)"},
       "comfort_verdict": {"name": "Comfort verdict", "state": {"ok": "OK", "overheating": "Overheating", "underheating": "Underheating", "unknown": "Unknown"}},
-      "comfort_advice": {"name": "Comfort advice", "state": {"lower_supply_temperature": "Lower the supply temperature", "raise_supply_temperature": "Raise the supply temperature", "check_hydraulics_or_balancing": "Check hydraulics or balancing", "check_schedule_or_override": "Check schedule or manual override", "none": "No action needed"}}
+      "comfort_advice": {"name": "Comfort advice", "state": {"lower_supply_temperature": "Lower the supply temperature", "raise_supply_temperature": "Raise the supply temperature", "check_hydraulics_or_balancing": "Check hydraulics or balancing", "check_schedule_or_override": "Check schedule or manual override", "none": "No action needed"}},
+      "return_temperature": {"name": "Return temperature"},
+      "delta_t": {"name": "Delta T"},
+      "delta_t_quality": {"name": "Delta T quality", "state": {"valid": "Valid", "stale": "Stale", "implausible": "Implausible", "frozen": "Frozen", "probe_unavailable": "No probe reporting"}},
+      "condensing_regime": {"name": "Condensing regime", "state": {"likely": "Likely", "unlikely": "Unlikely", "unknown": "Unknown"}},
+      "hydraulic_verdict": {"name": "Hydraulic verdict", "state": {"ok": "OK", "low_flow": "Low flow", "high_flow": "High flow", "unbalanced": "Unbalanced", "unknown": "Unknown"}},
+      "curve_calibration_advice": {"name": "Curve calibration advice", "state": {"none": "No action needed", "raise_supply_curve": "Raise the supply curve", "lower_supply_curve": "Lower the supply curve", "insufficient_data": "Insufficient data"}}
     },
     "binary_sensor": {
       "manual_override": {"name": "Manual override active"},
@@ -242,7 +264,8 @@
       "degraded": {"name": "Degraded operation"},
       "heat_request": {"name": "Heat request"},
       "overheating": {"name": "Overheating"},
-      "underheating": {"name": "Underheating"}
+      "underheating": {"name": "Underheating"},
+      "probe_fault": {"name": "Probe fault"}
     },
     "button": {
       "resume_auto": {"name": "Resume automatic"},

@@ -209,6 +209,103 @@ def test_v02_state_translations_match_the_constants_exactly():
             )
 
 
+def test_v03_state_translations_match_the_constants_exactly():
+    """The V0.3 probe enum sensors must be translated *exactly*.
+
+    Same reasoning as the V0.2 counterpart: these state keys are raw enum
+    values emitted by the entities, so a typo shows up in the UI as the raw
+    code (``raise_supply_curve``) rather than as an error. The comparison is
+    two-way against ``const`` in all three files.
+
+    ``delta_t_quality`` is checked against ``PROBE_QUALITIES`` rather than a
+    hand-written list so the ordering/severity list in ``const`` stays the
+    single source of truth.
+    """
+    from custom_components.climatepilot.const import (
+        CALIBRATION_INSUFFICIENT_DATA,
+        CALIBRATION_LOWER_CURVE,
+        CALIBRATION_NONE,
+        CALIBRATION_RAISE_CURVE,
+        CONDENSING_LIKELY,
+        CONDENSING_UNKNOWN,
+        CONDENSING_UNLIKELY,
+        HYDRAULIC_HIGH_FLOW,
+        HYDRAULIC_LOW_FLOW,
+        HYDRAULIC_OK,
+        HYDRAULIC_UNBALANCED,
+        HYDRAULIC_UNKNOWN,
+        PROBE_QUALITIES,
+    )
+
+    expected = {
+        "delta_t_quality": set(PROBE_QUALITIES),
+        "condensing_regime": {CONDENSING_LIKELY, CONDENSING_UNLIKELY, CONDENSING_UNKNOWN},
+        "hydraulic_verdict": {
+            HYDRAULIC_OK,
+            HYDRAULIC_LOW_FLOW,
+            HYDRAULIC_HIGH_FLOW,
+            HYDRAULIC_UNBALANCED,
+            HYDRAULIC_UNKNOWN,
+        },
+        "curve_calibration_advice": {
+            CALIBRATION_NONE,
+            CALIBRATION_RAISE_CURVE,
+            CALIBRATION_LOWER_CURVE,
+            CALIBRATION_INSUFFICIENT_DATA,
+        },
+    }
+
+    for name, path in (
+        ("strings.json", COMPONENT / "strings.json"),
+        ("en.json", COMPONENT / "translations" / "en.json"),
+        ("zh-Hans.json", COMPONENT / "translations" / "zh-Hans.json"),
+    ):
+        entity = json.loads(path.read_text(encoding="utf-8"))["entity"]["sensor"]
+        for key, literals in expected.items():
+            documented = set(entity[key].get("state", {}))
+            assert documented == literals, (
+                f"{name}: sensor.{key} state keys differ from const.py: "
+                f"missing={sorted(literals - documented)}, "
+                f"unknown={sorted(documented - literals)}"
+            )
+
+
+def test_v03_entity_keys_match_the_english_name_slug_contract():
+    """``slugify(英文名) == translation_key`` for the 7 V0.3 probe entities.
+
+    ``docs/INTERFACES_V0.3.md`` freezes this because the entity_id slug is
+    derived from the *English* name even under a Chinese UI, while the static
+    dashboard YAML has to hardcode those ids. If the two owners each derive the
+    slug their own way they drift (which is exactly what happened in V0.2), so
+    the equality is asserted here rather than assumed on both sides.
+    """
+    from homeassistant.util import slugify
+
+    frozen = {
+        "return_temperature": "Return temperature",
+        "delta_t": "Delta T",
+        "delta_t_quality": "Delta T quality",
+        "condensing_regime": "Condensing regime",
+        "hydraulic_verdict": "Hydraulic verdict",
+        "curve_calibration_advice": "Curve calibration advice",
+        "probe_fault": "Probe fault",
+    }
+
+    for name in ("strings.json", "en.json"):
+        path = COMPONENT / name if name == "strings.json" else COMPONENT / "translations" / name
+        entity = json.loads(path.read_text(encoding="utf-8"))["entity"]
+        for key, expected_name in frozen.items():
+            platform = "sensor" if key != "probe_fault" else "binary_sensor"
+            actual = entity[platform][key]["name"]
+            assert actual == expected_name, (
+                f"{name}: entity.{platform}.{key} name is {actual!r}, "
+                f"expected {expected_name!r} (frozen by INTERFACES_V0.3.md §3)"
+            )
+            assert slugify(actual) == key, (
+                f"{name}: slugify({actual!r}) = {slugify(actual)!r} != {key!r}"
+            )
+
+
 def test_translations_have_the_same_key_shape_as_strings():
     """en and zh-Hans must mirror the source key tree, not its text."""
 
@@ -333,6 +430,118 @@ def test_only_the_adapter_calls_climate_services():
     assert callers <= {"climate_adapter.py"}, (
         f"these modules call climate services directly: {sorted(callers)}"
     )
+
+
+def test_no_enum_constant_collides_with_a_reserved_ha_state():
+    """Enum values must not collide with Home Assistant's reserved states.
+
+    Home Assistant treats ``"unavailable"`` and ``"unknown"`` specially: an
+    entity reporting ``"unavailable"`` is rendered as genuinely unavailable -
+    greyed out, indistinguishable from a broken integration - and a test that
+    reads entity states sees the same string it would for a dead entity.
+    (``"unknown"`` is milder: it means "available, value not known".)
+
+    This is not hypothetical. ``PROBE_UNAVAILABLE`` was originally
+    ``"unavailable"``, so ``sensor.<system>_delta_t_quality`` reported the
+    reserved state whenever a probe was missing, and "no probe is reporting"
+    became indistinguishable from "ClimatePilot is dead" - the exact
+    distinction that sensor exists to draw.
+
+    The check is deliberately narrow: it rejects only ``"unavailable"`` in
+    constants published as *entity state values*, and explicitly allows
+    ``"unknown"``.
+
+    **Why ``"unknown"`` is allowed - do not "fix" this.** The two reserved
+    strings are not equivalent:
+
+    * ``unavailable`` means *the entity does not exist / is broken*.
+    * ``unknown`` means *the entity is fine, its value is not determined*.
+
+    The verdict constants want the second meaning: ``CONDENSING_UNKNOWN`` says
+    "the boiler's condensing regime is not determinable", which is exactly what
+    Home Assistant renders for ``"unknown"``. Rewriting them to something like
+    ``"condensing_unknown"`` to dodge the reserved word would be cargo-culting
+    this guard, and would make those sensors look broken to any consumer that
+    treats ``unknown`` as "no data yet". The concrete harm that motivated this
+    test - losing the difference between "no probe is reporting" and
+    "ClimatePilot is dead" - only applies to ``unavailable``.
+    """
+    from homeassistant.const import STATE_UNAVAILABLE
+
+    import custom_components.climatepilot.const as const
+
+    #: Values deliberately published as entity states.
+    published_state_constants = [
+        name
+        for name in vars(const)
+        if name.isupper()
+        and (
+            name.startswith("PROBE_")
+            or name.startswith("QUALITY_")
+            or name.startswith("CONDENSING_")
+            or name.startswith("HYDRAULIC_")
+            or name.startswith("CALIBRATION_")
+            or name.startswith("COMFORT_")
+            or name.startswith("ADVICE_")
+            or name.startswith("SOURCE_")
+            or name.startswith("FSM_")
+            or name.startswith("CONTROL_MODE_")
+            or name.startswith("ZONE_MODE_")
+        )
+    ]
+    assert published_state_constants, "no state constants found - check is vacuous"
+
+    offenders = [
+        (name, getattr(const, name))
+        for name in published_state_constants
+        if getattr(const, name) == STATE_UNAVAILABLE
+    ]
+    assert not offenders, (
+        "these constants publish HA's reserved 'unavailable' state and would make "
+        f"the entity look broken rather than probe-less: {offenders}"
+    )
+
+
+def test_unknown_verdicts_are_allowed_to_use_the_reserved_unknown_state():
+    """Pin the deliberate allowance, so the guard above cannot be over-tightened.
+
+    A future reader who sees the neighbour test reject a reserved HA state may
+    "finish the job" by also banning ``"unknown"`` - and would thereby break
+    verdicts whose correct meaning *is* Home Assistant's ``unknown``: "the
+    entity is fine, the value is not determined".
+
+    The ban is specific to ``unavailable`` (entity missing/broken). This test
+    states that positively, so over-tightening fails loudly with an explanation
+    instead of quietly changing the meaning of half a dozen sensors.
+    """
+    import custom_components.climatepilot.const as const
+
+    #: Verdicts that intentionally publish the reserved "unknown" state.
+    intentional = {
+        "QUALITY_UNKNOWN": const.QUALITY_UNKNOWN,
+        "CONDENSING_UNKNOWN": const.CONDENSING_UNKNOWN,
+        "HYDRAULIC_UNKNOWN": const.HYDRAULIC_UNKNOWN,
+        "COMFORT_UNKNOWN": const.COMFORT_UNKNOWN,
+    }
+    for name, value in intentional.items():
+        assert value == "unknown", (
+            f"{name} must stay 'unknown': it means 'available but not determined', "
+            f"which is precisely how Home Assistant renders that state. Got {value!r}."
+        )
+
+    # ...and none of them may drift onto the genuinely-broken reserved state.
+    assert const.PROBE_UNAVAILABLE != "unavailable"
+    assert const.PROBE_UNAVAILABLE != "unknown"
+
+
+def test_probe_qualities_are_distinct_and_non_empty():
+    """The quality ladder must be a usable total order over real values."""
+    import custom_components.climatepilot.const as const
+
+    qualities = list(const.PROBE_QUALITIES)
+    assert len(qualities) == len(set(qualities))
+    assert const.PROBE_VALID in qualities
+    assert const.PROBE_UNAVAILABLE in qualities
 
 
 def test_manifest_declares_the_expected_identity():

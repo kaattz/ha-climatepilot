@@ -64,6 +64,16 @@ CONF_SHORT_CYCLE_SECONDS: Final = "short_cycle_seconds"
 CONF_STARTUP_GRACE: Final = "startup_grace"
 CONF_PERIODIC_AUDIT: Final = "periodic_audit"
 
+# V0.3 probe / diagnostics tuning keys
+CONF_SUPPLY_PROBE_ENTITY: Final = "supply_probe_entity"
+CONF_PROBE_STALE_SECONDS: Final = "probe_stale_seconds"
+CONF_PROBE_FROZEN_SECONDS: Final = "probe_frozen_seconds"
+CONF_DELTA_T_WINDOW_SECONDS: Final = "delta_t_window_seconds"
+CONF_CONDENSING_RETURN_C: Final = "condensing_return_c"
+CONF_DELTA_T_HEALTHY_MIN: Final = "delta_t_healthy_min"
+CONF_DELTA_T_HEALTHY_MAX: Final = "delta_t_healthy_max"
+CONF_PROBE_MAX_DIVERGENCE: Final = "probe_max_divergence"
+
 # Device semantics verification (design doc section 6.3 / 14). These are
 # *user attestations* collected in the config flow. They gate every write to
 # the heat source; without them the integration stays in suggest-only mode.
@@ -262,6 +272,113 @@ ADVICE_NONE: Final = "none"
 #: points at the hardware. The deviation is still reported, so the room is never
 #: presented as warm.
 REASON_BELOW_TARGET_WITHOUT_DEMAND: Final = "below_target_without_demand"
+
+# ---------------------------------------------------------------------------
+# V0.3 - external pipe temperature probes (design doc 8, 12)
+# ---------------------------------------------------------------------------
+#: DS18B20 reports exactly this when its conversion fails or the bus is broken.
+#: It is the single most important sentinel to reject: 85 C looks like a
+#: plausible hot supply pipe, so a naive implementation reports a boiler fault
+#: that does not exist, or worse, an enormous delta-T that looks like a
+#: hydraulic success.
+DS18B20_ERROR_C: Final = 85.0
+#: Tolerance around the sentinel, because a probe sitting on a genuinely hot
+#: pipe could read 84.9 by accident. Anything at or above this is refused.
+DS18B20_ERROR_TOLERANCE: Final = 0.5
+
+#: Reading quality (probe-specific; deliberately separate from climate FEEDBACK_*).
+#:
+#: NOTE ON ``PROBE_UNAVAILABLE``: its value is deliberately **not** ``"unavailable"``.
+#: Home Assistant reserves that string (``homeassistant.const.STATE_UNAVAILABLE``)
+#: and renders any entity reporting it as genuinely *unavailable* - greyed out,
+#: indistinguishable from a broken integration. Publishing it would make "no probe
+#: is reporting" look identical to "ClimatePilot is dead", which is exactly the
+#: distinction this sensor exists to draw. The ``unknown`` family below is left
+#: as-is on purpose: ``unknown`` means "available, value not known", which is
+#: precisely what those verdicts intend.
+PROBE_VALID: Final = "valid"
+PROBE_STALE: Final = "stale"
+PROBE_IMPLAUSIBLE: Final = "implausible"
+PROBE_FROZEN: Final = "frozen"
+PROBE_UNAVAILABLE: Final = "probe_unavailable"
+
+PROBE_QUALITIES: Final = [
+    PROBE_VALID,
+    PROBE_STALE,
+    PROBE_IMPLAUSIBLE,
+    PROBE_FROZEN,
+    PROBE_UNAVAILABLE,
+]
+
+#: A reading older than this is stale (probe stopped reporting).
+DEFAULT_PROBE_STALE_AFTER: Final = 900.0
+#: A reading that has not changed at all for this long is suspect: a real pipe
+#: temperature always drifts. Only applied while the boiler is actually burning,
+#: because a cold idle pipe legitimately holds the same value for hours.
+DEFAULT_PROBE_FROZEN_AFTER: Final = 3600.0
+#: Plausible range for a hydronic pipe surface probe.
+DEFAULT_PROBE_MIN_C: Final = -20.0
+DEFAULT_PROBE_MAX_C: Final = 110.0
+#: Maximum believable disagreement between the supply and return probes.
+#:
+#: This must stay comfortably ABOVE the healthy delta-T range, and that is a
+#: correctness requirement rather than a tuning preference: the supply and
+#: return probes sit on the *same* hydraulic loop, so their difference is
+#: exactly the delta-T the diagnostics exist to measure. Rejecting a pair whose
+#: difference exceeds this value would reject every well-performing system --
+#: a healthy 7 C delta-T would be discarded as "divergent" and the whole
+#: feature would silently report nothing.
+#:
+#: It therefore only guards against a genuinely implausible pairing: one probe
+#: reading a hot pipe while the other reads a cold one. Instance-to-instance
+#: sensor bias is handled by the delta-T range check, not here.
+DEFAULT_PROBE_MAX_DIVERGENCE: Final = 25.0
+
+#: Delta-T window and sampling.
+DEFAULT_DELTA_T_WINDOW: Final = 3600.0
+DEFAULT_DELTA_T_SAMPLE_INTERVAL: Final = 60.0
+#: A stable run needs at least this long of settled readings before a trend is
+#: reported; shorter spans are dominated by valve and pump transients.
+DEFAULT_DELTA_T_MIN_STABLE_SECONDS: Final = 600.0
+#: Condensing assessment: a return temperature below this is a strong indirect
+#: indicator that the boiler is in its condensing regime. It is NOT an
+#: efficiency measurement (design doc 8).
+DEFAULT_CONDENSING_RETURN_C: Final = 55.0
+#: Delta-T considered healthy for a wet floor-heating system.
+DEFAULT_DELTA_T_HEALTHY_MIN: Final = 5.0
+DEFAULT_DELTA_T_HEALTHY_MAX: Final = 15.0
+
+#: Condensing regime verdicts (indirect indicators, never efficiency figures).
+CONDENSING_LIKELY: Final = "likely"
+CONDENSING_UNLIKELY: Final = "unlikely"
+CONDENSING_UNKNOWN: Final = "unknown"
+
+#: Hydraulic verdicts derived from delta-T under a known zone combination.
+HYDRAULIC_OK: Final = "ok"
+HYDRAULIC_LOW_FLOW: Final = "low_flow"
+HYDRAULIC_HIGH_FLOW: Final = "high_flow"
+HYDRAULIC_UNBALANCED: Final = "unbalanced"
+HYDRAULIC_UNKNOWN: Final = "unknown"
+
+#: Weather-curve calibration advice (advisory only - never applied automatically).
+CALIBRATION_NONE: Final = "none"
+CALIBRATION_RAISE_CURVE: Final = "raise_supply_curve"
+CALIBRATION_LOWER_CURVE: Final = "lower_supply_curve"
+CALIBRATION_INSUFFICIENT_DATA: Final = "insufficient_data"
+
+#: Reason codes for probe diagnostics.
+REASON_PROBE_STALE: Final = "probe_reading_stale"
+REASON_PROBE_SENTINEL: Final = "probe_sentinel_value_85c"
+REASON_PROBE_OUT_OF_RANGE: Final = "probe_out_of_range"
+REASON_PROBE_FROZEN: Final = "probe_value_frozen"
+REASON_PROBE_DIVERGENT: Final = "probe_pair_divergent"
+REASON_PROBE_MISSING: Final = "probe_not_configured"
+REASON_DELTA_T_TRANSIENT: Final = "delta_t_transient"
+REASON_DELTA_T_UNSTABLE: Final = "delta_t_not_settled"
+REASON_DELTA_T_OK: Final = "delta_t_within_healthy_range"
+REASON_DELTA_T_LOW: Final = "delta_t_below_healthy_range"
+REASON_DELTA_T_HIGH: Final = "delta_t_above_healthy_range"
+REASON_NOT_A_POWER_MEASUREMENT: Final = "temperature_difference_is_not_heat_power"
 
 # ---------------------------------------------------------------------------
 # HVAC actions / modes as reported by climate entities

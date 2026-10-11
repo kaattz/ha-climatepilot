@@ -8,10 +8,11 @@ by [HomeAxis](https://github.com/kaattz)
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-18BCF2.svg)](https://www.home-assistant.io/)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **v0.2.0 — 未部署到实机、未经现场验证。** 全部阈值与曲线均为设计建议值。
+> **v0.3.0 — 未部署到实机、未经现场验证。** 全部阈值与曲线均为设计建议值。
+> 外贴探头属于**监测/优化输入，不承担锅炉安全停机功能**。
 > 见 [CHANGELOG.md](CHANGELOG.md)。
 
 </div>
@@ -96,6 +97,23 @@ KNX 面板没有 HA 用户身份，因此不能用 `context.user_id` 判断手�
 
 V0.2 在此之上增加**燃烧质量分级**（`cycling_quality`，只看采暖燃烧的平均时长）与**无需求点火计数**（`unexplained_burns_24h`），用于区分"地暖在短循环"与"锅炉因生活热水/自身逻辑点火"。
 
+### 7. 探头诊断（V0.3）
+
+外贴 DS18B20 供回水探头 + ΔT 趋势、冷凝工况与水力判定。**这一层全是只读诊断**：
+
+- **85℃ 哨兵**：DS18B20 转换失败或总线断开时报出的**恰好是 85℃**。集成把它判为
+  `implausible`（数值不可信），**不是**"一根很热的管子"——否则会凭空报出不存在的
+  锅炉故障，或算出一个看起来很成功、其实毫无意义的"巨大 ΔT"。看到 `probe_fault`
+  请**先查接线**，不要以为锅炉坏了。
+- **ΔT 不是热功率**。供回水温差**不能**用来推算效率或热输出，它只是流动与冷凝工况的
+  **间接**指标。所有输出都带 `is_power_measurement = False` 标记。
+- **探头失联不影响核心采暖控制**：探头故障只降低诊断可信度，不改变房间目标、
+  不改变锅炉启停、不改变供水温度。
+- **探头未配置 ≠ 实体故障**：未装探头时读数显示 `unknown` 但实体仍可用，
+  `probe_fault` 保持 off。
+
+安装要求与逐项处置建议见 [DEPLOYMENT 7.5](docs/DEPLOYMENT.md)。
+
 ## 安装
 
 ### HACS（推荐）
@@ -157,8 +175,14 @@ cp -r /tmp/climatepilot/custom_components/climatepilot /config/custom_components
 | `sensor.<system>_combinations_24h` | 组合 → 占比明细（JSON 属性） |
 | `sensor.<system>_cycling_quality` | 采暖燃烧质量：良好 / 一般 / 偏差 / 未知 |
 | `sensor.<system>_unexplained_burns_24h` | 无任何分区需求却点火的次数 |
+| `sensor.<system>_return_temperature` | 回水温度（外贴探头，未装则 `unknown`） |
+| `sensor.<system>_delta_t` | 供回水温差 ΔT（**不是热功率**） |
+| `sensor.<system>_delta_t_quality` | 探头读数质量：有效 / 过期 / 不可信 / 卡死 / **无探头读数** |
+| `sensor.<system>_condensing_regime` | 冷凝工况（间接指标）：可能在冷凝 / 不太可能 / 未知 |
+| `sensor.<system>_hydraulic_verdict` | 水力判定：正常 / 温差偏低 / 温差偏高 / 失衡 / 未知 || `sensor.<system>_curve_calibration_advice` | 曲线校准**建议**（集成不会自动改曲线） |
 | `binary_sensor.<system>_short_cycle_alert` | 短循环告警 |
 | `binary_sensor.<system>_degraded` | 受限运行 |
+| `binary_sensor.<system>_probe_fault` | 任一**已配置**探头不可信（未装探头不报） |
 | `number.<system>_supply_temperature_override` | 手动设定供水温度 |
 | `button.<system>_reassess` | 立即重新评估 |
 | `climate.<system>_thermostat` | 全屋采暖总览（**不复制**各个 KNX 房间实体） |
@@ -241,6 +265,8 @@ custom_components/climatepilot/
 ├── diagnostics_engine.py    # 燃烧统计与质量分级（纯引擎）
 ├── zone_combinations.py     # 区域组合分析（纯引擎，V0.2）
 ├── comfort_diagnostics.py   # 过热/欠温诊断（纯引擎，V0.2）
+├── probe_monitor.py         # 探头可用性与 85℃ 哨兵（纯引擎，V0.3）
+├── delta_t_diagnostics.py   # ΔT / 冷凝 / 水力 / 校准建议（纯引擎，V0.3）
 ├── climate_adapter.py       # KNX/锅炉 climate 适配
 ├── store.py                 # 状态持久化与版本迁移
 ├── coordinator.py           # 唯一的 I/O 协调者
@@ -250,7 +276,7 @@ custom_components/climatepilot/
 └── diagnostics.py           # HA 诊断导出（脱敏）
 ```
 
-**架构约束：** `temperature_arbiter` / `zone_coordinator` / `aux_load` / `weather_compensator` / `heat_source` / `diagnostics_engine` / `zone_combinations` / `comfort_diagnostics` 是**纯 Python 引擎**，不 import Home Assistant，因此其行为可以脱离 HA 独立测试，且所有时间由参数注入（不调用 `datetime.now()`）。
+**架构约束：** `temperature_arbiter` / `zone_coordinator` / `aux_load` / `weather_compensator` / `heat_source` / `diagnostics_engine` / `zone_combinations` / `comfort_diagnostics` / `probe_monitor` / `delta_t_diagnostics` 是**纯 Python 引擎**，不 import Home Assistant，因此其行为可以脱离 HA 独立测试，且所有时间由参数注入（不调用 `datetime.now()`）。
 
 **可解释性：** 每个写入决策都带原因码（`manual_override`、`schedule_transition`、`cold_adjustment`、`range_clamp`、`boiler_min_flow_unverified` 等），并暴露在实体属性中。
 
@@ -268,8 +294,8 @@ custom_components/climatepilot/
 ## 状态与路线图
 
 - **V0.1** — 温度仲裁、手动覆盖、日程、写入回声识别、需求聚合、热源状态机、天气补偿、诊断与恢复
-- **V0.2（当前）** — ✅ 辅助热负载与燃烧诊断增强、✅ **区域组合变化分析**、✅ **过热/欠温诊断**、✅ **燃烧质量分级（区分采暖/生活热水）**、✅ **每房间/锅炉调度可视化**
-- **V0.3** — ESPHome 外贴回水/供水探头、ΔT 趋势与冷凝工况评估
+- **V0.2** — ✅ 辅助热负载与燃烧诊断增强、✅ **区域组合变化分析**、✅ **过热/欠温诊断**、✅ **燃烧质量分级（区分采暖/生活热水）**、✅ **每房间/锅炉调度可视化**
+- **V0.3（当前）** — ✅ **ESPHome 外贴供回水探头与可用性/偏差检测（含 85℃ 哨兵）**、✅ **ΔT 趋势监测**、✅ **冷凝工况评估（间接指标）**、✅ **不同区域组合的水力诊断**、✅ **天气补偿曲线校准建议（纯建议，不自动改曲线）**
 - **V1.0** — 多家庭部署、国际化、升级迁移、不同品牌适配器契约测试
 
 ### V0.2 新增：诊断层
@@ -291,7 +317,34 @@ V0.2 增加的全部是**只读诊断**，不改变控制行为：
 可视化面板见 [`dashboards/climatepilot.yaml`](dashboards/climatepilot.yaml)，
 导入说明见 [docs/DASHBOARD.md](docs/DASHBOARD.md)。
 
-> **部署状态**：V0.2 **未部署到实机、未经现场验证**，全部判据为设计建议值。
+### V0.3 新增：探头诊断层
+
+V0.3 增加的同样是**只读诊断**，不改变控制行为：
+
+| 能力 | 实体 | 说明 |
+|---|---|---|
+| **探头可用性** | `delta_t_quality` / `probe_fault` | 把一路原始读数判为有效/过期/不可信/卡死/无探头读数，并识别 85℃ 哨兵 |
+| **ΔT 趋势** | `return_temperature` / `delta_t` | 供回水温差及其趋势（**不是热功率**） |
+| **冷凝工况** | `condensing_regime` | 回水温度是否低于冷凝判据（**间接**指标） |
+| **水力判定** | `hydraulic_verdict` | 由 ΔT 落在健康区间的哪一侧，推断流量过大 / 流量不足 / 失衡 |
+| **曲线校准** | `curve_calibration_advice` | 结合欠温/过热证据给出的**纯建议** |
+
+> **⚠️ 键名不等于字面含义**：`hydraulic_verdict` 的 `low_flow` / `high_flow`
+> 是**「低 ΔT 工况 / 高 ΔT 工况」的标签，不是"流量太小/太大"的判断**。
+> **低 ΔT（`low_flow`）通常意味着流量偏大**或旁通短路；**高 ΔT（`high_flow`）
+> 才意味着流量不足**。若按字面把 `high_flow` 读成"流量太大"去关小循环泵，
+> 会把已经流量不足的系统调得更糟。完整对照表见
+> [docs/DEPLOYMENT.md 第 7.5.5 节](docs/DEPLOYMENT.md)。
+
+> **⚠️ 探头是监测输入，不是安全装置。**
+> 探头损坏、断线、读数异常**不会**改变集成的任何写入决策；
+> 锅炉的最小流量保护、过热保护与防冻逻辑始终由锅炉自身负责。
+> `curve_calibration_advice` 只是建议 —— 集成**不会**自动修改天气补偿曲线，
+> 曲线由你在配置中持有，需要你自己去 options 里调整。
+> 安装要求与逐项处置建议见 [docs/DEPLOYMENT.md 第 7.5 节](docs/DEPLOYMENT.md)。
+
+> **部署状态**：V0.3 **未部署到实机、未经现场验证**，
+> 尚未在真实 DS18B20 探头上验证过；全部判据为设计建议值。
 > 详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可
@@ -302,3 +355,4 @@ MIT — 见 [LICENSE](LICENSE)
 
 *本文档描述的初始水温参数与曲线为**待现场验证**的建议值，不是热负荷计算结论。集成不宣称已通过所有锅炉型号的实机验证；锅炉启停与生活热水行为必须在你的设备上实测确认。*
 *V0.2 的区域组合、舒适度与燃烧质量诊断同样**未部署到实机、未经现场验证**，只输出建议，不会自动修改锅炉。*
+*V0.3 的探头诊断**未部署到实机、未经现场验证**（尚未在真实 DS18B20 上标定）。探头只作监测/优化输入，**不承担锅炉安全停机功能**；ΔT **不是**热功率，不能据此推算效率或热输出；曲线校准建议不会自动生效。*

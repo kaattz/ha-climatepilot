@@ -1,7 +1,8 @@
-# ClimatePilot — Lovelace dashboard (V0.2)
+# ClimatePilot — Lovelace dashboard (V0.3)
 #
-# Sections layout, four groups per the V0.2 scope: system overview, demand
-# combinations, combustion quality, and per-room arbitration + comfort.
+# Sections layout, five groups: system overview, demand combinations,
+# combustion quality, external probes / delta-T (V0.3), and per-room
+# arbitration + comfort.
 #
 # HOW TO USE
 #   1. Entity ids below are the ones a reference installation produces: system
@@ -212,7 +213,116 @@ views:
                 name: 当前是否有需求
 
       # ------------------------------------------------------------------
-      # 4. Per room - arbitration first, then comfort
+      # 4. External probes and delta-T (V0.3)
+      #
+      # Optional equipment: these cards stay empty until strap-on probes are
+      # configured. "No probe installed" shows as `unknown`, NOT as a fault and
+      # NOT as 0 - an unmeasured pipe and a cold pipe are different facts.
+      #
+      # READ THIS BEFORE TRUSTING ANY NUMBER BELOW: a temperature difference is
+      # NOT heat power or efficiency. delta-T is an *indirect* flow and
+      # condensing indicator only, and every card here carries
+      # `is_power_measurement: false` in its attributes to say so.
+      # ------------------------------------------------------------------
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: 探头与供回水温差
+            heading_style: title
+            icon: mdi:thermometer-lines
+
+          # The strap-on return probe. `unknown` = no usable probe (not fitted,
+          # stale, frozen, or the DS18B20 85 °C sentinel value).
+          - type: tile
+            entity: sensor.wo_de_jia_return_temperature
+            name: 回水温度 (外贴)
+
+          # Supply - return. Indirect flow/condensing indicator, never power.
+          - type: tile
+            entity: sensor.wo_de_jia_delta_t
+            name: 供回水温差 ΔT
+
+          # Worst of the two probe qualities: valid / stale / implausible /
+          # frozen / unavailable.
+          - type: tile
+            entity: sensor.wo_de_jia_delta_t_quality
+            name: 探头质量
+
+          # A configured probe that became unusable. Off when nothing is
+          # fitted - an absent probe is not a fault.
+          - type: tile
+            entity: binary_sensor.wo_de_jia_probe_fault
+            name: 探头故障
+
+          # Indirect condensing indicator from the return temperature.
+          - type: tile
+            entity: sensor.wo_de_jia_condensing_regime
+            name: 冷凝工况
+
+          # Hydraulic signal from the settled ΔT: low ΔT usually means excessive
+          # flow or a bypass short-circuit; high ΔT means insufficient flow.
+          # Both are flow signals, not "efficiency scores".
+          - type: tile
+            entity: sensor.wo_de_jia_hydraulic_verdict
+            name: 水力判定
+
+          # Advisory only - the weather curve is never changed automatically.
+          - type: tile
+            entity: sensor.wo_de_jia_curve_calibration_advice
+            name: 曲线校准建议
+
+          - type: entities
+            title: 判定依据（ΔT 不是热功率）
+            show_header_toggle: false
+            entities:
+              - type: attribute
+                entity: sensor.wo_de_jia_delta_t
+                attribute: average
+                name: 窗口平均 ΔT
+              - type: attribute
+                entity: sensor.wo_de_jia_delta_t
+                attribute: minimum
+                name: 窗口最小 ΔT
+              - type: attribute
+                entity: sensor.wo_de_jia_delta_t
+                attribute: maximum
+                name: 窗口最大 ΔT
+              - type: attribute
+                entity: sensor.wo_de_jia_delta_t
+                attribute: trend_per_hour
+                name: ΔT 趋势 (每小时)
+              - type: attribute
+                entity: sensor.wo_de_jia_delta_t
+                attribute: stable_seconds
+                name: 已稳定时长 (秒)
+              - type: attribute
+                entity: sensor.wo_de_jia_delta_t
+                attribute: samples
+                name: 样本数
+              - type: attribute
+                entity: sensor.wo_de_jia_delta_t
+                attribute: is_power_measurement
+                name: 是否热功率 (恒为 false)
+              - type: attribute
+                entity: sensor.wo_de_jia_delta_t_quality
+                attribute: divergence
+                name: 供回探头偏差
+              - type: attribute
+                entity: sensor.wo_de_jia_delta_t_quality
+                attribute: reason_codes
+                name: 原因码
+              - type: attribute
+                entity: sensor.wo_de_jia_curve_calibration_advice
+                attribute: advisory_only
+                name: 仅建议 (不自动改)
+              - type: attribute
+                entity: binary_sensor.wo_de_jia_probe_fault
+                attribute: affects_heating
+                name: 是否影响采暖 (恒为 false)
+
+      # ------------------------------------------------------------------
+      # 5. Per room - arbitration first, then comfort
       # ------------------------------------------------------------------
       - type: grid
         column_span: 4

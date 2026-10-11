@@ -30,13 +30,21 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_BOILER_ENTITY,
     CONF_BURNER_STATE_ENTITY,
+    CONF_CONDENSING_RETURN_C,
     CONF_CONTROL_MODE,
+    CONF_DELTA_T_HEALTHY_MAX,
+    CONF_DELTA_T_HEALTHY_MIN,
+    CONF_DELTA_T_WINDOW_SECONDS,
     CONF_OUTDOOR_STALE_MINUTES,
     CONF_OUTDOOR_TEMP_ENTITY,
     CONF_PERIODIC_AUDIT,
+    CONF_PROBE_FROZEN_SECONDS,
+    CONF_PROBE_MAX_DIVERGENCE,
+    CONF_PROBE_STALE_SECONDS,
     CONF_RETURN_TEMP_ENTITY,
     CONF_SHORT_CYCLE_SECONDS,
     CONF_STARTUP_GRACE,
+    CONF_SUPPLY_PROBE_ENTITY,
     CONF_SUPPLY_TEMP_ENTITY,
     CONF_VERIFY_HEATING_ONLY,
     CONF_VERIFY_MIN_FLOW,
@@ -61,10 +69,17 @@ from .const import (
     CONF_ZONE_TOLERANCE,
     CONF_ZONES,
     CONTROL_MODES,
+    DEFAULT_CONDENSING_RETURN_C,
+    DEFAULT_DELTA_T_HEALTHY_MAX,
+    DEFAULT_DELTA_T_HEALTHY_MIN,
+    DEFAULT_DELTA_T_WINDOW,
     DEFAULT_MAX_TEMP,
     DEFAULT_MIN_TEMP,
     DEFAULT_OVERRIDE_MINUTES,
     DEFAULT_PERIODIC_AUDIT,
+    DEFAULT_PROBE_FROZEN_AFTER,
+    DEFAULT_PROBE_MAX_DIVERGENCE,
+    DEFAULT_PROBE_STALE_AFTER,
     DEFAULT_SHORT_CYCLE_SECONDS,
     DEFAULT_STARTUP_GRACE,
     DEFAULT_TARGET_STEP,
@@ -96,12 +111,14 @@ STEP_ZONE_MENU: Final = "zone_menu"
 STEP_ZONE_DETAIL: Final = "zone_detail"
 STEP_SCHEDULE: Final = "schedule"
 STEP_HEAT_SOURCE: Final = "heat_source"
+STEP_PROBES: Final = "probes"
 STEP_DIAGNOSTICS: Final = "diagnostics"
 
 MENU_OPTIONS: Final = [
     STEP_ZONES,
     STEP_STRATEGIES,
     STEP_HEAT_SOURCE,
+    STEP_PROBES,
     STEP_DIAGNOSTICS,
 ]
 ZONE_MENU_OPTIONS: Final = [STEP_ZONE_DETAIL, STEP_SCHEDULE]
@@ -136,11 +153,43 @@ VERIFY_KEYS: Final = (
     CONF_VERIFY_MIN_FLOW,
 )
 
-#: Sensor roles collected next to the boiler entity (all optional).
+#: Sensor roles collected next to the boiler entity (all optional). The V0.3
+#: strap-on supply probe belongs here too: both flows persist exactly this tuple,
+#: and ``test_translations_sync`` derives the expected label set from it, so a new
+#: role cannot be added to the form without its translation following.
 BOILER_SENSOR_KEYS: Final = (
     CONF_BURNER_STATE_ENTITY,
     CONF_SUPPLY_TEMP_ENTITY,
     CONF_RETURN_TEMP_ENTITY,
+    CONF_SUPPLY_PROBE_ENTITY,
+)
+
+#: The subset of :data:`BOILER_SENSOR_KEYS` that is a temperature reading, and
+#: therefore gets a ``device_class: temperature`` selector rather than a generic
+#: sensor one. Derived, never restated, so the two cannot drift.
+BOILER_TEMPERATURE_KEYS: Final = tuple(
+    key for key in BOILER_SENSOR_KEYS if key != CONF_BURNER_STATE_ENTITY
+)
+
+#: The V0.3 external strap-on probe pair (docs/INTERFACES_V0.3.md section 4.5).
+#: Both are optional; an installation without them is fully supported and simply
+#: reports ``unknown`` for the probe entities. ``CONF_RETURN_TEMP_ENTITY`` is the
+#: same physical probe the ΔT engine reads, so it is listed once, here and in
+#: ``BOILER_SENSOR_KEYS``.
+PROBE_ENTITY_KEYS: Final = (
+    CONF_SUPPLY_PROBE_ENTITY,
+    CONF_RETURN_TEMP_ENTITY,
+)
+
+#: Every tunable V0.3 probe/delta-T threshold, in form order.
+PROBE_THRESHOLD_KEYS: Final = (
+    CONF_PROBE_STALE_SECONDS,
+    CONF_PROBE_FROZEN_SECONDS,
+    CONF_DELTA_T_WINDOW_SECONDS,
+    CONF_CONDENSING_RETURN_C,
+    CONF_DELTA_T_HEALTHY_MIN,
+    CONF_DELTA_T_HEALTHY_MAX,
+    CONF_PROBE_MAX_DIVERGENCE,
 )
 
 # Selector bounds. These are *input* guards only: the real device limits are
@@ -165,6 +214,22 @@ GRACE_LOW: Final = 0
 GRACE_HIGH: Final = 3600
 AUDIT_LOW: Final = 60
 AUDIT_HIGH: Final = 86400
+
+# V0.3 probe / delta-T thresholds. Same contract as the bounds above: these are
+# *input* guards so the form cannot store a nonsense value; the engines remain
+# the authority on how the stored value is used.
+PROBE_STALE_LOW: Final = 60
+PROBE_STALE_HIGH: Final = 86400
+PROBE_FROZEN_LOW: Final = 60
+PROBE_FROZEN_HIGH: Final = 86400
+DELTA_T_WINDOW_LOW: Final = 300
+DELTA_T_WINDOW_HIGH: Final = 86400
+CONDENSING_RETURN_LOW: Final = 20.0
+CONDENSING_RETURN_HIGH: Final = 70.0
+DELTA_T_LOW: Final = -10.0
+DELTA_T_HIGH: Final = 40.0
+DIVERGENCE_LOW: Final = 0.5
+DIVERGENCE_HIGH: Final = 30.0
 
 #: ``HH:MM=温度``. The separator class deliberately accepts the full-width
 #: equals sign a Chinese IME produces as well as ASCII ``=``; a decimal comma is
@@ -546,7 +611,12 @@ def validate_curve(curve: Mapping[str, Any]) -> str | None:
 # Whole-form schemas shared with the config flow
 # ---------------------------------------------------------------------------
 def boiler_schema(config: Mapping[str, Any]) -> vol.Schema:
-    """Heat-source entity plus the optional diagnostic sensors."""
+    """Heat-source entity plus the optional diagnostic sensors and probes.
+
+    ``CONF_RETURN_TEMP_ENTITY`` appears once, in :data:`PROBE_ENTITY_KEYS`: it is
+    the same physical strap-on return probe the ΔT engine reads, so collecting it
+    twice under two different roles would let the two disagree.
+    """
     boiler = config.get(CONF_BOILER_ENTITY)
     boiler_kwargs: dict[str, Any] = {}
     if boiler:
@@ -555,12 +625,18 @@ def boiler_schema(config: Mapping[str, Any]) -> vol.Schema:
             "description": {"suggested_value": boiler},
         }
     fields: dict[Any, Any] = {vol.Required(CONF_BOILER_ENTITY, **boiler_kwargs): climate_selector()}
-    for key, entity_selector in (
-        (CONF_BURNER_STATE_ENTITY, sensor_selector()),
-        (CONF_SUPPLY_TEMP_ENTITY, sensor_selector(device_class="temperature")),
-        (CONF_RETURN_TEMP_ENTITY, sensor_selector(device_class="temperature")),
-    ):
-        marker, field = _optional_entity_field(key, config.get(key), entity_selector)
+
+    # The burner sensor is not a temperature reading, so it gets a plain sensor
+    # selector; every other role is a °C probe.
+    marker, field = _optional_entity_field(
+        CONF_BURNER_STATE_ENTITY, config.get(CONF_BURNER_STATE_ENTITY), sensor_selector()
+    )
+    fields[marker] = field
+
+    for key in BOILER_TEMPERATURE_KEYS:
+        marker, field = _optional_entity_field(
+            key, config.get(key), sensor_selector(device_class="temperature")
+        )
         fields[marker] = field
     return vol.Schema(fields)
 
@@ -592,6 +668,109 @@ def outdoor_schema(config: Mapping[str, Any]) -> vol.Schema:
         unit="min",
     )
     return vol.Schema({marker: field, stale: stale_field})
+
+
+def probes_schema(config: Mapping[str, Any]) -> vol.Schema:
+    """The seven V0.3 probe/delta-T thresholds (docs/INTERFACES_V0.3.md 4.5).
+
+    Grouped by what they tune: how long a reading stays believable (stale,
+    frozen), then how the ΔT verdicts are drawn (window, condensing return,
+    healthy band, pair divergence).
+    """
+    stale, stale_field = number_field(
+        CONF_PROBE_STALE_SECONDS,
+        config.get(CONF_PROBE_STALE_SECONDS),
+        default=float(DEFAULT_PROBE_STALE_AFTER),
+        minimum=PROBE_STALE_LOW,
+        maximum=PROBE_STALE_HIGH,
+        step=30,
+        unit="s",
+    )
+    frozen, frozen_field = number_field(
+        CONF_PROBE_FROZEN_SECONDS,
+        config.get(CONF_PROBE_FROZEN_SECONDS),
+        default=float(DEFAULT_PROBE_FROZEN_AFTER),
+        minimum=PROBE_FROZEN_LOW,
+        maximum=PROBE_FROZEN_HIGH,
+        step=60,
+        unit="s",
+    )
+    window, window_field = number_field(
+        CONF_DELTA_T_WINDOW_SECONDS,
+        config.get(CONF_DELTA_T_WINDOW_SECONDS),
+        default=float(DEFAULT_DELTA_T_WINDOW),
+        minimum=DELTA_T_WINDOW_LOW,
+        maximum=DELTA_T_WINDOW_HIGH,
+        step=300,
+        unit="s",
+    )
+    condensing, condensing_field = number_field(
+        CONF_CONDENSING_RETURN_C,
+        config.get(CONF_CONDENSING_RETURN_C),
+        default=float(DEFAULT_CONDENSING_RETURN_C),
+        minimum=CONDENSING_RETURN_LOW,
+        maximum=CONDENSING_RETURN_HIGH,
+        step=1,
+        unit="°C",
+        mode=selector.NumberSelectorMode.SLIDER,
+    )
+    healthy_min, healthy_min_field = number_field(
+        CONF_DELTA_T_HEALTHY_MIN,
+        config.get(CONF_DELTA_T_HEALTHY_MIN),
+        default=float(DEFAULT_DELTA_T_HEALTHY_MIN),
+        minimum=DELTA_T_LOW,
+        maximum=DELTA_T_HIGH,
+        step=0.5,
+        unit="°C",
+        mode=selector.NumberSelectorMode.SLIDER,
+    )
+    healthy_max, healthy_max_field = number_field(
+        CONF_DELTA_T_HEALTHY_MAX,
+        config.get(CONF_DELTA_T_HEALTHY_MAX),
+        default=float(DEFAULT_DELTA_T_HEALTHY_MAX),
+        minimum=DELTA_T_LOW,
+        maximum=DELTA_T_HIGH,
+        step=0.5,
+        unit="°C",
+        mode=selector.NumberSelectorMode.SLIDER,
+    )
+    divergence, divergence_field = number_field(
+        CONF_PROBE_MAX_DIVERGENCE,
+        config.get(CONF_PROBE_MAX_DIVERGENCE),
+        default=float(DEFAULT_PROBE_MAX_DIVERGENCE),
+        minimum=DIVERGENCE_LOW,
+        maximum=DIVERGENCE_HIGH,
+        step=0.5,
+        unit="°C",
+    )
+    return vol.Schema(
+        {
+            stale: stale_field,
+            frozen: frozen_field,
+            window: window_field,
+            condensing: condensing_field,
+            healthy_min: healthy_min_field,
+            healthy_max: healthy_max_field,
+            divergence: divergence_field,
+        }
+    )
+
+
+def validate_delta_t_range(config: Mapping[str, Any]) -> str | None:
+    """Return ``invalid_delta_t_range`` when the healthy band is inverted.
+
+    ``healthy_min >= healthy_max`` would make every settled ΔT either "low flow"
+    or "high flow" and never "ok", so the verdict would be permanently wrong
+    rather than merely misconfigured. Rejected at the form, exactly like the
+    weather curve's own range check.
+    """
+    healthy_min = _as_float(config.get(CONF_DELTA_T_HEALTHY_MIN))
+    healthy_max = _as_float(config.get(CONF_DELTA_T_HEALTHY_MAX))
+    if healthy_min is None or healthy_max is None:
+        return "invalid_delta_t_range"
+    if healthy_min >= healthy_max:
+        return "invalid_delta_t_range"
+    return None
 
 
 def diagnostics_schema(config: Mapping[str, Any]) -> vol.Schema:
@@ -948,6 +1127,27 @@ class ClimatePilotOptionsFlow(OptionsFlowWithReload):
         )
         return self.async_show_form(step_id=STEP_HEAT_SOURCE, data_schema=schema, errors=errors)
 
+    # -- probes --------------------------------------------------------
+    async def async_step_probes(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Edit the V0.3 probe and delta-T thresholds."""
+        config = self.config
+
+        if user_input is not None:
+            candidate = {key: float(user_input[key]) for key in PROBE_THRESHOLD_KEYS}
+            error = validate_delta_t_range(candidate)
+            if error:
+                # Re-render with the submitted values still selected, so the user
+                # can see which pair was rejected instead of retyping everything.
+                return self.async_show_form(
+                    step_id=STEP_PROBES,
+                    data_schema=probes_schema({**config, **candidate}),
+                    errors={"base": error},
+                )
+            config.update(candidate)
+            return self._save()
+
+        return self.async_show_form(step_id=STEP_PROBES, data_schema=probes_schema(config))
+
     # -- diagnostics ---------------------------------------------------
     async def async_step_diagnostics(
         self, user_input: dict[str, Any] | None = None
@@ -966,11 +1166,16 @@ class ClimatePilotOptionsFlow(OptionsFlowWithReload):
 
 
 __all__ = [
+    "BOILER_SENSOR_KEYS",
+    "BOILER_TEMPERATURE_KEYS",
     "CURVE_FIELD_KEYS",
     "MENU_OPTIONS",
+    "PROBE_ENTITY_KEYS",
+    "PROBE_THRESHOLD_KEYS",
     "STEP_DIAGNOSTICS",
     "STEP_HEAT_SOURCE",
     "STEP_INIT",
+    "STEP_PROBES",
     "STEP_SCHEDULE",
     "STEP_STRATEGIES",
     "STEP_ZONES",
@@ -993,8 +1198,10 @@ __all__ = [
     "number_field",
     "outdoor_schema",
     "parse_schedule_text",
+    "probes_schema",
     "schedule_config",
     "validate_curve",
+    "validate_delta_t_range",
     "verify_schema",
     "weather_mode_selector",
     "zone_choices",

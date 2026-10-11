@@ -102,7 +102,12 @@ class ClimatePilotConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id=STEP_USER, data_schema=schema)
 
     async def async_step_boiler(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Pick the heat-source climate entity and its monitoring sensors."""
+        """Pick the heat-source climate entity, its sensors and pipe probes.
+
+        Every sensor role in :data:`BOILER_SENSOR_KEYS` is optional, including the
+        V0.3 strap-on supply/return probes: an installation without them is fully
+        supported and simply reports ``unknown`` for the probe entities.
+        """
         errors: dict[str, str] = {}
 
         if user_input is not None:
