@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "ClimatePilot 采暖系统",
-        "description": "创建一套采暖系统。房间与策略可在创建后于“配置”中继续添加。",
+        "title": "ClimatePilot 智暖领航",
+        "description": "创建一套采暖系统（智暖领航）。房间与策略可在创建后于“配置”中继续添加。",
         "data": {
           "system_name": "系统名称"
         }
@@ -213,52 +213,133 @@
   },
   "entity": {
     "select": {
-      "control_mode": {"name": "控制模式", "state": {"observe": "观察", "coordinate": "协调", "paused": "暂停"}},
-      "zone_mode": {"name": "房间模式", "state": {"auto": "自动", "comfort": "舒适", "eco": "节能", "away": "外出", "manual": "手动"}}
+      "control_mode": {
+        "name": "控制模式",
+        "state": {
+          "observe": "观察",
+          "coordinate": "协调",
+          "paused": "暂停"
+        }
+      },
+      "zone_mode": {
+        "name": "房间模式",
+        "state": {
+          "auto": "自动",
+          "comfort": "舒适",
+          "eco": "节能",
+          "away": "外出",
+          "manual": "手动"
+        }
+      }
     },
     "sensor": {
-      "heating_state": {"name": "采暖状态", "state": {"observe": "观察", "idle": "无需求", "prepare": "准备", "heating": "采暖中", "satisfied": "已满足", "degraded": "受限"}},
-      "active_zones": {"name": "需求分区数"},
-      "suggested_supply_temp": {"name": "建议供水温度"},
-      "outdoor_temperature": {"name": "室外温度"},
-      "supply_temperature": {"name": "供水温度"},
-      "burner_starts_24h": {"name": "24 小时点火次数"},
-      "last_burn_duration": {"name": "最近一次燃烧时长"},
-      "effective_setpoint": {"name": "有效设定温度"},
-      "setpoint_source": {"name": "设定来源", "state": {"manual": "手动覆盖", "fixed_mode": "固定模式", "schedule": "日程", "cold_adjustment": "寒潮修正", "aux_load": "辅助负载", "fallback": "缺省"}},
-      "zone_temperature": {"name": "房间温度"},
-      "override_remaining": {"name": "手动覆盖剩余时间"}
+      "heating_state": {
+        "name": "采暖状态",
+        "state": {
+          "observe": "观察",
+          "idle": "无需求",
+          "prepare": "准备",
+          "heating": "采暖中",
+          "satisfied": "已满足",
+          "degraded": "受限"
+        }
+      },
+      "active_zones": {
+        "name": "需求分区数"
+      },
+      "suggested_supply_temp": {
+        "name": "建议供水温度"
+      },
+      "outdoor_temperature": {
+        "name": "室外温度"
+      },
+      "supply_temperature": {
+        "name": "供水温度"
+      },
+      "burner_starts_24h": {
+        "name": "24 小时点火次数"
+      },
+      "last_burn_duration": {
+        "name": "最近一次燃烧时长"
+      },
+      "effective_setpoint": {
+        "name": "有效设定温度"
+      },
+      "setpoint_source": {
+        "name": "设定来源",
+        "state": {
+          "manual": "手动覆盖",
+          "fixed_mode": "固定模式",
+          "schedule": "日程",
+          "cold_adjustment": "寒潮修正",
+          "aux_load": "辅助负载",
+          "fallback": "缺省"
+        }
+      },
+      "zone_temperature": {
+        "name": "房间温度"
+      },
+      "override_remaining": {
+        "name": "手动覆盖剩余时间"
+      }
     },
     "binary_sensor": {
-      "manual_override": {"name": "手动覆盖中"},
-      "short_cycle_alert": {"name": "短循环告警"},
-      "degraded": {"name": "受限运行"},
-      "heat_request": {"name": "采暖请求"}
+      "manual_override": {
+        "name": "手动覆盖中"
+      },
+      "short_cycle_alert": {
+        "name": "短循环告警"
+      },
+      "degraded": {
+        "name": "受限运行"
+      },
+      "heat_request": {
+        "name": "采暖请求"
+      }
     },
     "button": {
-      "resume_auto": {"name": "恢复自动"},
-      "reassess": {"name": "立即重新评估"}
+      "resume_auto": {
+        "name": "恢复自动"
+      },
+      "reassess": {
+        "name": "立即重新评估"
+      }
     },
     "number": {
-      "supply_temperature_override": {"name": "供水温度手动设定"}
+      "supply_temperature_override": {
+        "name": "供水温度手动设定"
+      }
     },
     "switch": {
-      "auxiliary_load": {"name": "辅助热负载"}
+      "auxiliary_load": {
+        "name": "辅助热负载"
+      }
     },
     "climate": {
-      "system_thermostat": {"name": "全屋采暖"}
+      "system_thermostat": {
+        "name": "全屋采暖"
+      }
     }
   },
   "services": {
     "resume_auto": {
       "name": "恢复自动",
       "description": "清除指定房间（或全部房间）的手动覆盖，立即回到日程目标。",
-      "fields": {"zone_id": {"name": "房间 ID", "description": "留空表示全部房间。"}}
+      "fields": {
+        "zone_id": {
+          "name": "房间 ID",
+          "description": "留空表示全部房间。"
+        }
+      }
     },
     "set_supply_temperature": {
       "name": "设置供水温度",
       "description": "显式设置锅炉供水温度，受设备能力与已核验语义约束。",
-      "fields": {"temperature": {"name": "目标供水温度"}}
+      "fields": {
+        "temperature": {
+          "name": "目标供水温度"
+        }
+      }
     },
     "reassess": {
       "name": "立即重新评估",
