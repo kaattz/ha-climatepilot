@@ -227,13 +227,22 @@
       "effective_setpoint": {"name": "Effective setpoint"},
       "setpoint_source": {"name": "Setpoint source", "state": {"manual": "Manual override", "fixed_mode": "Fixed mode", "schedule": "Schedule", "cold_adjustment": "Cold-snap adjustment", "aux_load": "Auxiliary load", "fallback": "Fallback"}},
       "zone_temperature": {"name": "Room temperature"},
-      "override_remaining": {"name": "Manual override remaining"}
+      "override_remaining": {"name": "Manual override remaining"},
+      "dominant_zone_combination": {"name": "Dominant zone combination"},
+      "zone_combination_count": {"name": "Distinct zone combinations (24 h)"},
+      "combinations_24h": {"name": "Zone combination breakdown (24 h)"},
+      "cycling_quality": {"name": "Combustion quality", "state": {"good": "Good", "fair": "Fair", "poor": "Poor", "unknown": "Unknown"}},
+      "unexplained_burns_24h": {"name": "Unexplained burner starts (24 h)"},
+      "comfort_verdict": {"name": "Comfort verdict", "state": {"ok": "OK", "overheating": "Overheating", "underheating": "Underheating", "unknown": "Unknown"}},
+      "comfort_advice": {"name": "Comfort advice", "state": {"lower_supply_temperature": "Lower the supply temperature", "raise_supply_temperature": "Raise the supply temperature", "check_hydraulics_or_balancing": "Check hydraulics or balancing", "check_schedule_or_override": "Check schedule or manual override", "none": "No action needed"}}
     },
     "binary_sensor": {
       "manual_override": {"name": "Manual override active"},
       "short_cycle_alert": {"name": "Short cycle alert"},
       "degraded": {"name": "Degraded operation"},
-      "heat_request": {"name": "Heat request"}
+      "heat_request": {"name": "Heat request"},
+      "overheating": {"name": "Overheating"},
+      "underheating": {"name": "Underheating"}
     },
     "button": {
       "resume_auto": {"name": "Resume automatic"},

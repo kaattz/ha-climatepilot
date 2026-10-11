@@ -33,9 +33,12 @@ from homeassistant.util import dt as dt_util
 
 from .aux_load import AuxLoadController, AuxLoadState
 from .climate_adapter import ClimateAdapter, ClimateSnapshot
+from .comfort_diagnostics import ComfortAnalyser, ComfortVerdict
 from .const import (
+    CIRCUIT_HEATING,
     CONF_AUX_LOAD,
     CONF_BOILER_ENTITY,
+    CONF_BURNER_CIRCUIT,
     CONF_BURNER_STATE_ENTITY,
     CONF_CONTROL_MODE,
     CONF_HEAT_SOURCE,
@@ -62,6 +65,7 @@ from .const import (
     FSM_DEGRADED,
     FSM_STATES,
     HVAC_ACTION_HEATING,
+    QUALITY_UNKNOWN,
     REASON_CONTROL_PAUSED,
     REASON_DEGRADED,
     REASON_ENTITY_UNAVAILABLE,
@@ -90,6 +94,7 @@ from .models import (
 from .store import ClimatePilotStore
 from .temperature_arbiter import TemperatureArbiter, active_slot_key
 from .weather_compensator import CompensationResult, WeatherCompensator, WeatherReading
+from .zone_combinations import CombinationReport, ZoneCombinationTracker
 from .zone_coordinator import ZoneCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -131,7 +136,12 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.burner = BurnerStats(
             short_cycle_seconds=float(
                 options.get(CONF_SHORT_CYCLE_SECONDS, DEFAULT_SHORT_CYCLE_SECONDS)
-            )
+            ),
+            # Which circuit the burner sensor watches. The Rinnai integration
+            # exposes one sensor per circuit using the *same* value vocabulary,
+            # so "Heating Water" on the space-heating sensor means the heating
+            # circuit is firing - a fact the raw string cannot convey.
+            circuit=options.get(CONF_BURNER_CIRCUIT, CIRCUIT_HEATING),
         )
 
         capabilities = self._build_capabilities(options)
@@ -140,6 +150,10 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             capabilities=capabilities,
         )
         self.aux_controller = AuxLoadController(AuxLoadConfig.from_dict(options.get(CONF_AUX_LOAD)))
+
+        # --- V0.2 diagnostics engines ------------------------------------
+        self.combinations_tracker = ZoneCombinationTracker()
+        self.comfort_analyser = ComfortAnalyser()
 
         self.store = ClimatePilotStore(hass, self.system_id)
 
@@ -152,6 +166,10 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.compensation: CompensationResult | None = None
         self.aux_state = AuxLoadState()
         self.diagnostics_snapshot: dict[str, Any] = {}
+
+        #: V0.2 diagnostics, refreshed every evaluation cycle.
+        self.combinations: CombinationReport = self.combinations_tracker.report(dt_util.now())
+        self.comfort: dict[str, ComfortVerdict] = {}
 
         self._zone_slot_keys: dict[str, tuple[Any, ...] | None] = {}
         self._started_at: datetime = dt_util.now()
@@ -632,9 +650,69 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         step = snapshot.target_step or 1.0
         return abs(current - target) >= max(step, 0.1)
 
+    # ------------------------------------------------------------------
+    # V0.2 diagnostics
+    # ------------------------------------------------------------------
+    def _async_update_v02_diagnostics(self, now: datetime) -> None:
+        """Refresh the zone-combination and comfort diagnostics.
+
+        Both engines are observation-only: they never influence arbitration or
+        what gets written to a device. Their output exists to answer "why is the
+        system behaving like this" (design doc 8, 10.3).
+        """
+        # --- zone combinations -------------------------------------------
+        demanding = sorted(
+            zone_id for zone_id, zone in self.zones.items() if self._zone_demands_heat(zone)
+        )
+        self.combinations_tracker.note_demand(demanding, now)
+        self.combinations = self.combinations_tracker.report(now)
+
+        # --- per-zone comfort --------------------------------------------
+        for zone_id, zone in self.zones.items():
+            if zone.feedback_quality == FEEDBACK_UNAVAILABLE:
+                # No trustworthy reading: the analyser records nothing and
+                # reports "unknown" rather than inventing a temperature.
+                current: float | None = None
+            else:
+                current = zone.current_temperature
+
+            self.comfort_analyser.note(
+                zone_id,
+                current=current,
+                target=zone.effective_setpoint,
+                demanding=self._zone_demands_heat(zone),
+                now=now,
+            )
+
+        # Drop zones that were removed from the options, so a renamed or
+        # deleted room cannot leave a stale verdict behind.
+        for stale_id in set(self.comfort_analyser.verdicts(now)) - set(self.zones):
+            self.comfort_analyser.drop_zone(stale_id)
+
+        self.comfort = self.comfort_analyser.verdicts(now)
+
+    @property
+    def cycling_quality(self) -> str:
+        """Combustion quality grade over the diagnostics window."""
+        burner_snapshot = self.diagnostics_snapshot.get("burner") or {}
+        return str(burner_snapshot.get("cycling_quality", QUALITY_UNKNOWN))
+
+    @property
+    def cycling_quality_reason(self) -> str:
+        burner_snapshot = self.diagnostics_snapshot.get("burner") or {}
+        return str(burner_snapshot.get("cycling_quality_reason", ""))
+
+    @property
+    def unexplained_burns(self) -> int:
+        """Ignitions in the last 24 h with no zone demanding heat."""
+        burner_snapshot = self.diagnostics_snapshot.get("burner") or {}
+        return int(burner_snapshot.get("unexplained_burns_24h", 0))
+
+    def comfort_for(self, zone_id: str) -> ComfortVerdict | None:
+        return self.comfort.get(zone_id)
+
     def _async_update_diagnostics(self, now: datetime) -> None:
         """Feed the burner statistics.
-
         A dedicated burner-state sensor (the Rinnai integration exposes one per
         circuit) is preferred over the boiler's own ``hvac_action``, because it
         lets heating burns be told apart from domestic-hot-water burns.
@@ -645,7 +723,14 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             source = state.state if state is not None else None
         elif self.boiler_entity:
             source = self.adapter.snapshot(self.boiler_entity).hvac_action
+
+        # The burner correlation needs to know whether *we* were asking for
+        # heat, so it must be told before the state is fed in - otherwise a
+        # demand-less ignition would be attributed to a live demand.
+        self.burner.note_demand(now, self.active_zone_count > 0)
         self.burner.note_state(source, now)
+
+        self._async_update_v02_diagnostics(now)
 
         self.diagnostics_snapshot = {
             "burner": self.burner.snapshot(now),
@@ -717,6 +802,12 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.state_machine.restore(data.get("heat_source"))
         self.weather.restore(data.get("weather"))
         self.burner.restore(data.get("burner"))
+        # V0.2 diagnostics. Restoring them matters practically: a restart would
+        # otherwise reset the burner history and make the system look like it
+        # had just been commissioned, hiding exactly the cycling problems the
+        # diagnostics exist to surface.
+        self.combinations_tracker.restore(data.get("combinations"))
+        self.comfort_analyser.restore(data.get("comfort"))
         _LOGGER.info("Restored ClimatePilot state for %d zones", len(stored_zones))
 
     def _async_schedule_save(self) -> None:
@@ -735,6 +826,8 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "heat_source": self.state_machine.snapshot(),
             "weather": self.weather.snapshot(),
             "burner": self.burner.snapshot(now),
+            "combinations": self.combinations_tracker.snapshot(),
+            "comfort": self.comfort_analyser.snapshot(),
             "control_mode": self.control_mode,
         }
 

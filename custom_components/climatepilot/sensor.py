@@ -5,11 +5,18 @@ section 2.8) and carries a ``translation_key`` that exists in ``strings.json``
 under ``entity.sensor``.  Names are never hardcoded so the frontend stays
 localisable.
 
-Two sensors publish raw engine constants which ``strings.json`` translates:
-``heating_state`` (``FSM_*``) and ``setpoint_source`` (``SOURCE_*``).  Both fall
-back to ``unknown`` instead of inventing a state when an engine has not produced
-a decision yet, and every value that could be misread as "zero" is reported as
-``None`` rather than a fabricated number (design doc 6.1, 11).
+Several sensors publish raw engine constants which ``strings.json`` translates:
+``heating_state`` (``FSM_*``), ``setpoint_source`` (``SOURCE_*``) and the V0.2
+trio ``comfort_verdict`` (``COMFORT_*``), ``comfort_advice`` (``ADVICE_*``) and
+``cycling_quality`` (``QUALITY_*``).  All of them fall back to ``unknown``
+instead of inventing a state when an engine has not produced a decision yet, and
+every value that could be misread as "zero" is reported as ``None`` rather than
+a fabricated number (design doc 6.1, 11).
+
+The V0.2 diagnostic sensors carry the engine output that explains *why* the
+system behaves as it does: the zone-combination report on
+``combinations_24h`` and the comfort verdict on ``comfort_verdict`` expose their
+engine's ``as_dict()`` so the answer travels with the value (design doc 10.3).
 """
 
 from __future__ import annotations
@@ -30,9 +37,23 @@ from .base import (
     ClimatePilotZoneEntity,
 )
 from .const import (
+    ADVICE_CHECK_HYDRAULICS,
+    ADVICE_CHECK_SCHEDULE,
+    ADVICE_LOWER_SUPPLY,
+    ADVICE_NONE,
+    ADVICE_RAISE_SUPPLY,
+    COMFORT_OK,
+    COMFORT_OVERHEATING,
+    COMFORT_UNDERHEATING,
+    COMFORT_UNKNOWN,
+    DEFAULT_COMBINATION_WINDOW,
     DOMAIN,
     FEEDBACK_VALID,
     FSM_STATES,
+    QUALITY_FAIR,
+    QUALITY_GOOD,
+    QUALITY_POOR,
+    QUALITY_UNKNOWN,
     SOURCE_AUX_LOAD,
     SOURCE_COLD_ADJUSTMENT,
     SOURCE_FALLBACK,
@@ -56,6 +77,31 @@ SETPOINT_SOURCES: list[str] = [
     SOURCE_COLD_ADJUSTMENT,
     SOURCE_AUX_LOAD,
     SOURCE_FALLBACK,
+]
+
+#: Order mirrors the ``state`` translations in ``strings.json`` for the V0.2
+#: enum sensors.  Publishing a value outside its list would make Home Assistant
+#: raise instead of render, so every ``native_value`` below checks membership.
+COMFORT_VERDICTS: list[str] = [
+    COMFORT_OK,
+    COMFORT_OVERHEATING,
+    COMFORT_UNDERHEATING,
+    COMFORT_UNKNOWN,
+]
+
+COMFORT_ADVICE: list[str] = [
+    ADVICE_LOWER_SUPPLY,
+    ADVICE_RAISE_SUPPLY,
+    ADVICE_CHECK_HYDRAULICS,
+    ADVICE_CHECK_SCHEDULE,
+    ADVICE_NONE,
+]
+
+CYCLING_QUALITIES: list[str] = [
+    QUALITY_GOOD,
+    QUALITY_FAIR,
+    QUALITY_POOR,
+    QUALITY_UNKNOWN,
 ]
 
 
@@ -291,6 +337,208 @@ class LastBurnDurationSensor(_SystemDiagnosticSensor):
 
 
 # ---------------------------------------------------------------------------
+# System level - V0.2 demand combinations and combustion quality
+# ---------------------------------------------------------------------------
+
+
+class DominantZoneCombinationSensor(ClimatePilotEntity, SensorEntity):
+    """Which rooms demanded heat together for most of the window.
+
+    Deliberately **not** a diagnostic entity: "the living room and the master
+    bedroom are the pair that runs this house" is an everyday insight, and a
+    diagnostic category hides it behind the entity filter on the dashboard.
+    """
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "dominant_zone_combination")
+        self._attr_translation_key = "dominant_zone_combination"
+
+    @property
+    def native_value(self) -> str | None:
+        """The combination key, e.g. ``living_room+master_bedroom``.
+
+        ``none`` is a real answer here (``const.COMBINATION_NONE``): it means the
+        window held no heating demand at all.  ``None`` is reserved for "there is
+        no report yet", which is a different claim.
+        """
+        report = self.coordinator.combinations
+        return None if report is None else report.dominant_key
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Explain the ranking behind the key (design doc 10.3).
+
+        ``dominant_threshold`` / ``has_dominant_mode`` are read out of the
+        engine's own export rather than off the report object: they are *why*
+        the key should be trusted, so they belong to the explanation, and
+        ``as_dict()`` is the frozen surface for explanations.
+        """
+        report = self.coordinator.combinations
+        if report is None:
+            return {"evaluated": False}
+        detail = report.as_dict()
+        return {
+            "evaluated": True,
+            "dominant_share": round(report.dominant_share, 4),
+            "dominant_threshold": detail.get("dominant_threshold"),
+            # False means the demand time is spread over several patterns; the
+            # key is still the leader, but it is not "the" combination.
+            "has_dominant_mode": detail.get("has_dominant_mode"),
+            "current_key": report.current_key,
+            "current_seconds": round(report.current_seconds, 1),
+            "distinct_count": report.distinct_count,
+            "total_demand_seconds": round(report.total_demand_seconds, 1),
+        }
+
+
+class ZoneCombinationCountSensor(ClimatePilotEntity, SensorEntity):
+    """How many different demand combinations the window contained.
+
+    Not diagnostic either: it answers "is my heating running one stable pattern
+    or scattering across many?", which is exactly the kind of thing the
+    zone-combination analysis exists to surface.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "zone_combination_count")
+        self._attr_translation_key = "zone_combination_count"
+
+    @property
+    def native_value(self) -> int | None:
+        report = self.coordinator.combinations
+        return None if report is None else report.distinct_count
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        report = self.coordinator.combinations
+        if report is None:
+            return {"evaluated": False}
+        return {
+            "evaluated": True,
+            "dominant_key": report.dominant_key,
+            # Groups in ``stats``, which - unlike ``distinct_count`` - includes
+            # the empty (no-demand) set.
+            "total_groups": report.as_dict().get("total_groups"),
+            "combinations": [stat.key for stat in report.stats],
+        }
+
+
+class Combinations24hSensor(_SystemDiagnosticSensor):
+    """Demand time accumulated inside the combination window, in seconds.
+
+    The state is *demand time*, not the combination count: ``zone_combination_count``
+    already publishes the count, and two entities repeating one number is noise
+    on a dashboard.  Demand time is the quantity that graphs and can back a
+    statistic, while the full breakdown lives in the attributes.
+    """
+
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "combinations_24h")
+        self._attr_translation_key = "combinations_24h"
+
+    @property
+    def native_value(self) -> float | None:
+        report = self.coordinator.combinations
+        return None if report is None else report.total_demand_seconds
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Carry the whole report, plus the same figure in minutes.
+
+        The engine's ``as_dict()`` ships verbatim so the entity and the
+        diagnostics export can never disagree about what was measured.  The
+        minutes copy saves every user (and every template) the division.
+        """
+        report = self.coordinator.combinations
+        if report is None:
+            return {"evaluated": False}
+        attributes = dict(report.as_dict())
+        attributes["evaluated"] = True
+        attributes["total_demand_minutes"] = round(report.total_demand_seconds / 60.0, 1)
+        attributes["window_seconds"] = DEFAULT_COMBINATION_WINDOW
+        return attributes
+
+
+class CyclingQualitySensor(_SystemDiagnosticSensor):
+    """Combustion quality grade over the diagnostics window (``QUALITY_*``).
+
+    Diagnostic because it grades the *boiler's* behaviour from burner
+    statistics - it is troubleshooting evidence, not a reading of the house.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = CYCLING_QUALITIES
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "cycling_quality")
+        self._attr_translation_key = "cycling_quality"
+
+    @property
+    def native_value(self) -> str | None:
+        quality = self.coordinator.cycling_quality
+        return quality if quality in CYCLING_QUALITIES else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the reasoning and the per-grade counts it was based on."""
+        burner = _burner_snapshot(self.coordinator)
+        return {
+            "reason": self.coordinator.cycling_quality_reason,
+            "grade_heating_24h": burner.get("grade_heating_24h"),
+            # DHW burns are graded too, but they are explicitly excluded from
+            # ``cycling_quality`` - a shower must not make the heating look bad.
+            "grade_dhw_24h": burner.get("grade_dhw_24h"),
+            "heating_starts_24h": burner.get("heating_starts_24h"),
+            "dhw_starts_24h": burner.get("dhw_starts_24h"),
+            "includes_dhw": burner.get("includes_dhw"),
+            "quality": burner.get("quality"),
+        }
+
+
+class UnexplainedBurns24hSensor(_SystemDiagnosticSensor):
+    """Ignitions in the window with no zone demanding heat (design doc 8)."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "unexplained_burns_24h")
+        self._attr_translation_key = "unexplained_burns_24h"
+
+    @property
+    def native_value(self) -> int | None:
+        """The count, or ``None`` while the burner reading is untrustworthy.
+
+        Zero unexplained burns and "we cannot see the burner" must not look the
+        same on a dashboard, so a reading that is not ``valid`` reports unknown.
+        """
+        if not _burner_quality_is_valid(self.coordinator):
+            return None
+        return self.coordinator.unexplained_burns
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        burner = _burner_snapshot(self.coordinator)
+        return {
+            # V0.1 spelling of the same measurement, kept so an existing
+            # automation reading this attribute does not break.
+            "burns_without_demand_24h": burner.get("burns_without_demand_24h"),
+            "demand_active": burner.get("demand_active"),
+            "burns_24h": burner.get("burns_24h"),
+            "heating_starts_24h": burner.get("heating_starts_24h"),
+            "dhw_starts_24h": burner.get("dhw_starts_24h"),
+            "cycling_quality": burner.get("cycling_quality"),
+            "quality": burner.get("quality"),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Zone level
 # ---------------------------------------------------------------------------
 
@@ -423,6 +671,80 @@ class OverrideRemainingSensor(ClimatePilotZoneEntity, SensorEntity):
         }
 
 
+class ComfortVerdictSensor(ClimatePilotZoneEntity, SensorEntity):
+    """Whether the room is actually comfortable (``COMFORT_*``).
+
+    Not diagnostic: "is this room too warm or too cold" is the single most
+    user-facing judgement the integration makes.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = COMFORT_VERDICTS
+
+    def __init__(self, coordinator: ClimatePilotCoordinator, zone_id: str) -> None:
+        super().__init__(coordinator, zone_id, "comfort_verdict")
+        self._attr_translation_key = "comfort_verdict"
+
+    @property
+    def native_value(self) -> str:
+        """A sampled verdict, or ``unknown`` when the room has none yet.
+
+        A room the analyser has not seen is *not* uncomfortable and its entity is
+        *not* broken - it is simply unmeasured, which is exactly what the
+        ``unknown`` state (and its translation) exists to say.
+        """
+        verdict = self.coordinator.comfort.get(self._zone_id)
+        if verdict is None or verdict.verdict not in COMFORT_VERDICTS:
+            return COMFORT_UNKNOWN
+        return verdict.verdict
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Ship the engine's full verdict so the number panel is explainable."""
+        verdict = self.coordinator.comfort.get(self._zone_id)
+        if verdict is None:
+            return {"evaluated": False}
+        attributes = dict(verdict.as_dict())
+        attributes["evaluated"] = True
+        return attributes
+
+
+class ComfortAdviceSensor(ClimatePilotZoneEntity, SensorEntity):
+    """What to do about the verdict (``ADVICE_*``).
+
+    Kept as its own entity rather than an attribute of ``comfort_verdict`` so it
+    can be shown - and translated - on its own, and so an automation can trigger
+    on a specific advice code without parsing attributes.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = COMFORT_ADVICE
+
+    def __init__(self, coordinator: ClimatePilotCoordinator, zone_id: str) -> None:
+        super().__init__(coordinator, zone_id, "comfort_advice")
+        self._attr_translation_key = "comfort_advice"
+
+    @property
+    def native_value(self) -> str:
+        """The advice code, or ``none`` when there is nothing to advise."""
+        verdict = self.coordinator.comfort.get(self._zone_id)
+        if verdict is None or verdict.advice not in COMFORT_ADVICE:
+            return ADVICE_NONE
+        return verdict.advice
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        verdict = self.coordinator.comfort.get(self._zone_id)
+        if verdict is None:
+            return {"evaluated": False}
+        return {
+            "evaluated": True,
+            "verdict": verdict.verdict,
+            "average_deviation": round(verdict.average_deviation, 2),
+            "reason_codes": list(verdict.reason_codes),
+        }
+
+
 # ---------------------------------------------------------------------------
 # Platform setup
 # ---------------------------------------------------------------------------
@@ -444,6 +766,11 @@ async def async_setup_entry(
         SupplyTemperatureSensor(coordinator),
         BurnerStarts24hSensor(coordinator),
         LastBurnDurationSensor(coordinator),
+        DominantZoneCombinationSensor(coordinator),
+        ZoneCombinationCountSensor(coordinator),
+        Combinations24hSensor(coordinator),
+        CyclingQualitySensor(coordinator),
+        UnexplainedBurns24hSensor(coordinator),
     ]
 
     for zone_id in coordinator.zone_ids:
@@ -453,6 +780,8 @@ async def async_setup_entry(
                 SetpointSourceSensor(coordinator, zone_id),
                 ZoneTemperatureSensor(coordinator, zone_id),
                 OverrideRemainingSensor(coordinator, zone_id),
+                ComfortVerdictSensor(coordinator, zone_id),
+                ComfortAdviceSensor(coordinator, zone_id),
             )
         )
 

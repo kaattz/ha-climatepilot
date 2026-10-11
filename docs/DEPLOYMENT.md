@@ -262,6 +262,109 @@ DEGRADED  通讯异常 / 状态不明 → 停止新写入，人工接管
 - 生活热水燃烧**不计入**采暖短循环判定，但会在 `includes_dhw` 中标记 —— 避免把洗澡点火误判为地暖短循环；
 - 若你的设备只提供通用燃烧状态，统计会标记为「总燃烧次数，含可能的生活热水」。
 
+### 7.4 V0.2 诊断：怎么看、怎么处理
+
+> **先读这句：V0.2 的全部诊断都是"看"的，不是"做"的。**
+> `cycling_quality`、`comfort_verdict`、`comfort_advice`、`dominant_zone_combination`
+> 只**展示**判据与建议，**集成不会据此自动修改锅炉**——不会自动改水温、不会自动启停、
+> 不会自动改房间目标。技术设计方案第 8 节要求短循环**默认仅告警**，该约束在 V0.2 继续适用。
+> 下面的处置建议请**你自己判断后手动执行**。
+>
+> 另：V0.2 **未部署到实机、未经现场验证**。下面的阈值是设计建议值，
+> 需要在你的系统上跑满一个完整降温过程后才谈得上可信。
+
+#### 7.4.1 新增的诊断实体
+
+| 实体 | 取值 | 看什么 |
+|---|---|---|
+| `sensor.<system>_dominant_zone_combination` | 组合键或 `none` | 24 小时内占比最高的需求组合，如 `living_room+master_bedroom` |
+| `sensor.<system>_zone_combination_count` | 整数 | 出现过多少种不同组合。**种类越多说明需求越零碎** |
+| `sensor.<system>_combinations_24h` | JSON（属性） | 组合 → 占比明细，定位具体是哪些房间在同时要热 |
+| `sensor.<system>_cycling_quality` | `good` / `fair` / `poor` / `unknown` | 采暖燃烧质量分级，见 7.4.2 |
+| `sensor.<system>_unexplained_burns_24h` | 整数 | 24 小时内**没有任何分区要热**却点火的次数 |
+| `sensor.<room>_comfort_verdict` | `ok` / `overheating` / `underheating` / `unknown` | 该房间的舒适判定 |
+| `sensor.<room>_comfort_advice` | 建议码 | 该房间该怎么处理，见 7.4.3 |
+| `binary_sensor.<room>_overheating` | on / off | 持续高于目标 |
+| `binary_sensor.<room>_underheating` | on / off | 持续低于目标**且确实在要热** |
+
+`comfort_verdict` 为 `unknown` 表示**读数缺失**（`current_temperature` 或目标为
+`null`/不可用），不是"正常"。集成**绝不把缺失值当 0℃**——若长期为 `unknown`，
+先修传感器，不要据此判断房间冷热。
+
+#### 7.4.2 `cycling_quality` 的 good / fair / poor 阈值
+
+分级只看**采暖燃烧**的平均单次时长（生活热水燃烧**不参与**判定，
+所以洗澡点火不会把地暖质量拉低）：
+
+| 等级 | 判据 | 含义 |
+|---|---|---|
+| `good` | 平均单次燃烧 **≥ 600 秒** | 单次燃烧足够长，锅炉在稳定工况下运行 |
+| `fair` | 平均单次燃烧 **≥ 300 秒** 且 < 600 秒 | 偏短，值得观察 |
+| `poor` | 平均单次燃烧 **< 300 秒** | 典型短循环征兆：频繁启停、效率下降、部件磨损加快 |
+| `unknown` | 窗口内没有采暖燃烧 | 无数据，不是"良好" |
+
+阈值来自 `const.py` 的 `DEFAULT_CYCLING_GOOD_SECONDS = 600.0` 与
+`DEFAULT_CYCLING_POOR_SECONDS = 300.0`。实体属性里的 `cycling_quality_reason`
+会给出人类可读依据（例如 `average 245s over 6 heating burns`），
+**请以它为准**，不要只看等级字母。
+
+看到 `poor` 时的排查顺序：
+
+1. 先看 `sensor.<system>_zone_combination_count` 与 `combinations_24h`：
+   需求组合越零碎、切换越频繁，锅炉越容易被反复点火又熄火；
+2. 再看 `sensor.<system>_unexplained_burns_24h`：若明显 > 0，
+   说明有**不受集成的分区需求驱动**的点火（生活热水、锅炉自身逻辑、
+   或未纳入 ClimatePilot 的其它区域），这类点火不归集成管，
+   也不应该靠改补偿曲线去"修"；
+3. 最后才考虑调 7.2 的时间参数（加大需求消抖、延长最短停机）；
+4. **同时检查水力条件**——最小流量不足、旁通缺失同样会造成短循环，
+   那是硬件问题，软件参数改不掉。
+
+> 与 V0.1 的关系：`binary_sensor.<system>_short_cycle_alert` 的语义**未变**，
+> 仍然只看采暖与未知类型的燃烧、仍然**默认仅告警**。
+> `cycling_quality` 是同一批数据的"质量分级"视图，不是新的控制入口。
+> `sensor.<system>_unexplained_burns_24h` 与 V0.1 已有的
+> `burns_without_demand_24h` 是同一统计的显式命名，两个键都会保留。
+
+#### 7.4.3 `comfort_advice` 每个码该怎么处理
+
+触发条件（`const.py` 冻结的默认值，**当前不可在 UI 调整**）：
+
+| 判定 | 条件 |
+|---|---|
+| 过热 | 室温高于有效目标 **≥ 1.0℃**，持续 **≥ 30 分钟** |
+| 欠温 | 室温低于有效目标 **≥ 1.5℃**，**且该房间确实在要热**，持续 **≥ 60 分钟** |
+| 窗口 | 最近 24 小时，每 5 分钟最多记一个样本 |
+
+| 建议码 | 含义 | 你该做什么 |
+|---|---|---|
+| `raise_supply_temperature` | 房间**在要热、但长期达不到目标**——这是**供热能力不足**的征兆 | 考虑**提高供水温度**（或先提 `supply_design` 曲线点）。这是唯一"改水温可能有用"的码 |
+| `check_hydraulics_or_balancing` | 房间**偏冷但没有在要热**——不是水温不够，而是**热没送到该房间** | **不要改水温**。检查该房间的**阀门 / 执行器是否真的打开**、KNX 输出与阀体动作是否一致、**水力平衡**是否把这一路压得太低、该房间的日程或模式是否根本没让它要热 |
+| `lower_supply_temperature` | 房间过热，**同时还有别的房间在要热** | 说明当前水温对其他房间偏高。可考虑**下调供水温度**或收窄补偿曲线；注意降温会影响还在要热的房间，改完要回看它们是否转为欠温 |
+| `check_schedule_or_override` | 房间过热，**且没有其它房间在要热** | 水温不是原因（没人要热时锅炉本不该工作）。检查**日程/固定模式**是否把目标设低了，或存在**手动覆盖**未恢复——看 `sensor.<room>_setpoint_source` 与 `sensor.<room>_override_remaining` |
+| `none` | 判定为 `ok`，或该房间无有效读数（`unknown`） | 无需处理 |
+
+**两个最容易搞反的码**：
+
+- `check_hydraulics_or_balancing` **不是**"水温再高一点就好了"。
+  房间没在要热却偏冷，提高水温只会让**其它**房间过热，
+  该房间依然冷——问题在阀门、执行器或水力平衡。
+- `lower_supply_temperature` 与 `check_schedule_or_override` 的区别在于
+  **有没有别的房间在要热**：有人要热 → 可能是水温偏高；
+  没人要热 → 一定是日程或手动覆盖的问题，与水温无关。
+
+#### 7.4.4 组合零碎时的读法
+
+`sensor.<system>_zone_combination_count` 持续偏高（例如一天内十几种组合）
+说明各房间需求高度不同步。这本身不是故障，但会：
+
+- 让锅炉点火次数上升、单次燃烧变短（`cycling_quality` 转 `fair`/`poor`）；
+- 让"主导组合"的占比变低，说明**不存在稳定的主力采暖时段**。
+
+若 `dominant_zone_combination` 为 `none` 且 `active_zones` 长期为 0，
+请对照第 3.1 节复查需求判定（`hvac_action` 是否可靠），
+而不是去动水温参数。
+
 ---
 
 ## 8. 验收清单（打印出来逐项打勾）
@@ -291,6 +394,15 @@ DEGRADED  通讯异常 / 状态不明 → 停止新写入，人工接管
 - [ ] 无短循环告警
 - [ ] 全部房间到温效果符合预期
 
+**V0.2 诊断（未实机验证，仅观察）**
+- [ ] 已读第 7.4 节，明确这些是**诊断建议**、集成**不会**据此自动改锅炉
+- [ ] 每个房间的 `comfort_verdict` 与自己的体感一致；长期 `unknown` 说明读数缺失
+- [ ] `sensor.<system>_cycling_quality` 与 `cycling_quality_reason` 一起看，不只看等级
+- [ ] `unexplained_burns_24h` 已与生活热水/锅炉自身逻辑的点火对齐过
+- [ ] 收到 `check_hydraulics_or_balancing` 时**没有**去改水温，而是查了阀门/水力平衡
+- [ ] `dominant_zone_combination` 与 `combinations_24h` 的明细能解释实际使用习惯
+
 ---
 
 *本文档的参数与曲线为建议值，未经实机验证。锅炉启停与生活热水行为必须在你的设备上实测确认后才能启用协调模式。*
+*V0.2 新增的区域组合、舒适度与燃烧质量诊断同样**未部署到实机、未经现场验证**，其阈值需要在你的系统上实测标定；它们只输出建议，不会自动修改锅炉。*

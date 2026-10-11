@@ -1,0 +1,381 @@
+# ClimatePilot — Lovelace dashboard (V0.2)
+#
+# Sections layout, four groups per the V0.2 scope: system overview, demand
+# combinations, combustion quality, and per-room arbitration + comfort.
+#
+# HOW TO USE
+#   1. Entity ids below are the ones a reference installation produces: system
+#      named "我的家", rooms "客厅地暖" / "主卧地暖", UI language zh-Hans - the
+#      same installation tests/test_integration_setup.py boots. NOTE the shape:
+#      the *display names* are Chinese, but the *ids* are English slugs
+#      (`wo_de_jia_heating_state`, not `wo_de_jia_cai_nuan_zhuang_tai`).
+#
+#      That is HA's deliberate design, not an oversight: an entity id is only
+#      built from the localised name when the UI language is in
+#      `homeassistant.generated.languages.NATIVE_ENTITY_IDS` - 41 languages,
+#      none of them Chinese. Every other language falls back to English for the
+#      id while still showing a translated name, so ids stay stable and ASCII.
+#
+#      YOURS WILL STILL DIFFER unless you use these exact device names: the
+#      English entity name is prefixed with the slug of the *device* name, so
+#      renaming the system or a room moves every id under it. See
+#      docs/DASHBOARD.md section 1 for the full rule and how to list your ids.
+#   2. Nothing is registered automatically. Either:
+#        a) Settings > Dashboards > + Add dashboard > (new, empty) > open it >
+#           pencil > Raw configuration editor > paste this whole file > Save; or
+#        b) paste only the `views:` block into an existing dashboard's raw
+#           configuration to add this as one more view.
+#   3. Delete the rooms you do not have, and rename the ones you keep. Two rooms
+#      are written out because the reference installation has two; a third room
+#      is the same block again with the room slug substituted.
+#
+# Read-only by design: the only writable controls are the mode selects, the
+# supply-temperature number and the two buttons. Everything else reports.
+
+title: 采暖总览
+views:
+  - title: 采暖总览
+    path: climatepilot
+    icon: mdi:radiator
+    type: sections
+    max_columns: 4
+    sections:
+      # ------------------------------------------------------------------
+      # 1. System overview - what the coordinator decided this cycle
+      # ------------------------------------------------------------------
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: 系统总览
+            heading_style: title
+            icon: mdi:home-thermometer
+
+          # The FSM state (observe / idle / prepare / heating / satisfied /
+          # degraded). Its attributes carry the heat-source decision and the
+          # reason codes behind it.
+          - type: tile
+            entity: sensor.wo_de_jia_heating_state
+            name: 采暖状态
+
+          # The whole-home thermostat. It is a *summary* of every zone, not a
+          # proxy for any single one, which is why it sits here rather than
+          # under a room.
+          - type: tile
+            entity: climate.wo_de_jia_whole_home_heating
+            name: 全屋采暖总览
+
+          # Control mode is the one writable system-level setting: observe
+          # writes nothing, coordinate writes zone targets and the boiler.
+          - type: tile
+            entity: select.wo_de_jia_control_mode
+            name: 控制模式
+
+          # Zones with a *real* demand - a thermostat reporting "heating",
+          # not merely sitting in heat mode.
+          - type: tile
+            entity: sensor.wo_de_jia_zones_demanding_heat
+            name: 需求分区数
+
+          # Weather-compensation result. In observe mode this is advice only,
+          # and the entity's `should_apply` attribute says whether it was
+          # written to the boiler.
+          - type: tile
+            entity: sensor.wo_de_jia_suggested_supply_temperature
+            name: 建议供水温度
+
+          - type: tile
+            entity: sensor.wo_de_jia_supply_temperature
+            name: 实际供水温度
+
+          - type: tile
+            entity: sensor.wo_de_jia_outdoor_temperature
+            name: 室外温度
+
+      # ------------------------------------------------------------------
+      # 2. Demand combinations - which rooms ask for heat together
+      # ------------------------------------------------------------------
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: 需求组合
+            heading_style: title
+            icon: mdi:call-merge
+
+          # The pair/group that accounts for most of the window's heating
+          # time, e.g. "living_room+master_bedroom". `none` means no zone asked
+          # for heat at all - a measurement, not a missing value.
+          - type: tile
+            entity: sensor.wo_de_jia_dominant_zone_combination
+            name: 主导组合
+
+          - type: tile
+            entity: sensor.wo_de_jia_distinct_zone_combinations_24_h
+            name: 组合种类数
+
+          # State is accumulated demand time (seconds); the full breakdown
+          # per combination sits in its attributes.
+          - type: tile
+            entity: sensor.wo_de_jia_zone_combination_breakdown_24_h
+            name: 有需求总时长
+
+          # Attribute view: the whole CombinationReport, including the share
+          # each combination held and whether any of them is dominant enough
+          # to be called a pattern.
+          - type: entities
+            title: 组合明细
+            show_header_toggle: false
+            entities:
+              - type: attribute
+                entity: sensor.wo_de_jia_zone_combination_breakdown_24_h
+                attribute: dominant_share
+                name: 主导组合占比
+              - type: attribute
+                entity: sensor.wo_de_jia_zone_combination_breakdown_24_h
+                attribute: has_dominant_mode
+                name: 是否构成稳定模式
+              - type: attribute
+                entity: sensor.wo_de_jia_zone_combination_breakdown_24_h
+                attribute: current_key
+                name: 当前组合
+              - type: attribute
+                entity: sensor.wo_de_jia_zone_combination_breakdown_24_h
+                attribute: total_demand_minutes
+                name: 有需求总时长 (分钟)
+              - type: attribute
+                entity: sensor.wo_de_jia_dominant_zone_combination
+                attribute: dominant_threshold
+                name: 主导判定阈值
+
+      # ------------------------------------------------------------------
+      # 3. Combustion quality - what the boiler did with those demands
+      # ------------------------------------------------------------------
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: 燃烧质量
+            heading_style: title
+            icon: mdi:fire-alert
+
+          # Grades the *heating* burns by their average length. Domestic hot
+          # water is graded separately and never drags this down, so a shower
+          # cannot make the floor heating look like short cycling.
+          - type: tile
+            entity: sensor.wo_de_jia_combustion_quality
+            name: 采暖燃烧质量
+
+          - type: tile
+            entity: sensor.wo_de_jia_burner_starts_24_h
+            name: 24 小时点火次数
+
+          # Ignitions with no zone demanding heat: the signal that the boiler
+          # is firing for something ClimatePilot cannot see (frost protection,
+          # DHW, a stray schedule). Unavailable when the burner reading is not
+          # trustworthy - "blind" is not "zero".
+          - type: tile
+            entity: sensor.wo_de_jia_unexplained_burner_starts_24_h
+            name: 无需求点火 (24h)
+
+          - type: tile
+            entity: sensor.wo_de_jia_last_burn_duration
+            name: 最近燃烧时长
+
+          - type: tile
+            entity: binary_sensor.wo_de_jia_short_cycle_alert
+            name: 短循环告警
+
+          - type: tile
+            entity: binary_sensor.wo_de_jia_degraded_operation
+            name: 受限运行
+
+          - type: entities
+            title: 分级依据
+            show_header_toggle: false
+            entities:
+              - type: attribute
+                entity: sensor.wo_de_jia_combustion_quality
+                attribute: reason
+                name: 判定依据
+              - type: attribute
+                entity: sensor.wo_de_jia_combustion_quality
+                attribute: grade_heating_24h
+                name: 采暖燃烧分级
+              - type: attribute
+                entity: sensor.wo_de_jia_combustion_quality
+                attribute: grade_dhw_24h
+                name: 生活热水分级
+              - type: attribute
+                entity: sensor.wo_de_jia_unexplained_burner_starts_24_h
+                attribute: demand_active
+                name: 当前是否有需求
+
+      # ------------------------------------------------------------------
+      # 4. Per room - arbitration first, then comfort
+      # ------------------------------------------------------------------
+      - type: grid
+        column_span: 4
+        cards:
+          - type: heading
+            heading: 每个房间
+            heading_style: title
+            icon: mdi:floor-plan
+
+          # ---- Room 1: 客厅地暖 ------------------------------------------
+          - type: heading
+            heading: 客厅地暖
+            heading_style: subtitle
+            icon: mdi:sofa
+
+          # The single arbitrated target. Its attributes explain it: base
+          # value, winning source, adjustment delta, clamp, reason codes.
+          - type: tile
+            entity: sensor.ke_ting_di_nuan_effective_setpoint
+            name: 有效目标
+            features:
+              - type: target-temperature
+                entity: climate.livingroom_floorheating
+
+          - type: tile
+            entity: sensor.ke_ting_di_nuan_setpoint_source
+            name: 目标来源
+
+          - type: tile
+            entity: sensor.ke_ting_di_nuan_room_temperature
+            name: 房间温度
+
+          - type: tile
+            entity: binary_sensor.ke_ting_di_nuan_heat_request
+            name: 正在要热
+
+          # Comfort verdict: ok / overheating / underheating / unknown. Reads
+          # "unknown" (not "ok") until the analyser has samples for the room.
+          - type: tile
+            entity: sensor.ke_ting_di_nuan_comfort_verdict
+            name: 舒适判定
+
+          # The actionable code behind the verdict. Attribute `reason_codes`
+          # lists what the engine saw; see docs/DEPLOYMENT.md 7.4 for how to act
+          # on each code.
+          - type: tile
+            entity: sensor.ke_ting_di_nuan_comfort_advice
+            name: 处置建议
+
+          - type: tile
+            entity: binary_sensor.ke_ting_di_nuan_overheating
+            name: 持续过热
+
+          - type: tile
+            entity: binary_sensor.ke_ting_di_nuan_underheating
+            name: 持续欠温
+
+          - type: tile
+            entity: binary_sensor.ke_ting_di_nuan_manual_override_active
+            name: 手动覆盖中
+
+          - type: tile
+            entity: sensor.ke_ting_di_nuan_manual_override_remaining
+            name: 覆盖剩余
+
+          - type: tile
+            entity: select.ke_ting_di_nuan_room_mode
+            name: 房间模式
+
+          - type: tile
+            entity: switch.ke_ting_di_nuan_auxiliary_heat_load
+            name: 可作辅助负载
+
+          - type: tile
+            entity: button.ke_ting_di_nuan_resume_automatic
+            name: 恢复自动
+
+          # ---- Room 2: 主卧地暖 ------------------------------------------
+          # Same cards as room 1. Duplicate this block per extra room and
+          # substitute that room's slug in place of `zhu_wo_di_nuan`.
+          - type: heading
+            heading: 主卧地暖
+            heading_style: subtitle
+            icon: mdi:bed
+
+          - type: tile
+            entity: sensor.zhu_wo_di_nuan_effective_setpoint
+            name: 有效目标
+            features:
+              - type: target-temperature
+                entity: climate.master_bedroom_floorheating
+
+          - type: tile
+            entity: sensor.zhu_wo_di_nuan_setpoint_source
+            name: 目标来源
+
+          - type: tile
+            entity: sensor.zhu_wo_di_nuan_room_temperature
+            name: 房间温度
+
+          - type: tile
+            entity: binary_sensor.zhu_wo_di_nuan_heat_request
+            name: 正在要热
+
+          - type: tile
+            entity: sensor.zhu_wo_di_nuan_comfort_verdict
+            name: 舒适判定
+
+          - type: tile
+            entity: sensor.zhu_wo_di_nuan_comfort_advice
+            name: 处置建议
+
+          - type: tile
+            entity: binary_sensor.zhu_wo_di_nuan_overheating
+            name: 持续过热
+
+          - type: tile
+            entity: binary_sensor.zhu_wo_di_nuan_underheating
+            name: 持续欠温
+
+          - type: tile
+            entity: binary_sensor.zhu_wo_di_nuan_manual_override_active
+            name: 手动覆盖中
+
+          - type: tile
+            entity: sensor.zhu_wo_di_nuan_manual_override_remaining
+            name: 覆盖剩余
+
+          - type: tile
+            entity: select.zhu_wo_di_nuan_room_mode
+            name: 房间模式
+
+          - type: tile
+            entity: switch.zhu_wo_di_nuan_auxiliary_heat_load
+            name: 可作辅助负载
+
+          - type: tile
+            entity: button.zhu_wo_di_nuan_resume_automatic
+            name: 恢复自动
+
+          # ---- Cross-room actions ----------------------------------------
+          - type: heading
+            heading: 全局操作
+            heading_style: subtitle
+            icon: mdi:cog
+
+          - type: tile
+            entity: button.wo_de_jia_reassess_now
+            name: 立即重新评估
+
+          - type: tile
+            entity: number.wo_de_jia_manual_supply_temperature
+            name: 手动设定供水温度
+
+          # A plain-language summary for the person who does not want to read
+          # six attributes. Jinja is resolved by the frontend on every state
+          # change, so it always matches the tiles above.
+          - type: markdown
+            text_only: true
+            content: >-
+              **{{ states('sensor.wo_de_jia_heating_state') }}**
+              ｜需求 {{ states('sensor.wo_de_jia_zones_demanding_heat') }} 个分区
+              ｜主导组合 {{ states('sensor.wo_de_jia_dominant_zone_combination') }}
+              占比 {{ state_attr('sensor.wo_de_jia_dominant_zone_combination', 'dominant_share') }}
+              ｜采暖燃烧 {{ states('sensor.wo_de_jia_combustion_quality') }}
+              ｜无需求点火 {{ states('sensor.wo_de_jia_unexplained_burner_starts_24_h') }}

@@ -4,12 +4,20 @@ These entities answer "is this condition true right now?" for the dashboard and
 for automations:
 
 * ``manual_override`` / ``heat_request`` -- per room (design doc 4, 6.1);
-* ``short_cycle_alert`` / ``degraded`` -- system diagnostics (design doc 8, 11).
+* ``short_cycle_alert`` / ``degraded`` -- system diagnostics (design doc 8, 11);
+* ``overheating`` / ``underheating`` -- per room comfort faults (V0.2, section 3.2).
 
 Unknown is never reported as "off": when the coordinator cannot tell whether a
-zone requests heat, or when the burner reading is not trustworthy, the entity
-reports ``None`` (``unknown``) or becomes unavailable instead of claiming the
-safe-looking false value.
+zone requests heat, when the burner reading is not trustworthy, or when the
+comfort analyser has no samples for a room yet, the entity reports ``None``
+(``unknown``) or becomes unavailable instead of claiming the safe-looking false
+value.
+
+The two comfort flags read the *engine verdict* rather than re-deriving the
+comparison from the current temperature.  A single warm reading is not
+"overheating" -- a leaky valve and a sunlit afternoon are indistinguishable at
+that instant; only the dwell time the engine accumulates separates them, so the
+flag must come from the engine to stay consistent with ``sensor.comfort_verdict``.
 """
 
 from __future__ import annotations
@@ -26,6 +34,10 @@ from .base import (
     ClimatePilotZoneEntity,
 )
 from .const import (
+    COMFORT_OK,
+    COMFORT_OVERHEATING,
+    COMFORT_UNDERHEATING,
+    COMFORT_UNKNOWN,
     DOMAIN,
     FEEDBACK_UNAVAILABLE,
     FSM_DEGRADED,
@@ -203,6 +215,133 @@ class HeatRequestBinarySensor(ClimatePilotZoneEntity, BinarySensorEntity):
         }
 
 
+class _ComfortBinarySensor(ClimatePilotZoneEntity, BinarySensorEntity):
+    """Shared plumbing for the over/underheating flags.
+
+    Both flags answer one question -- "did this room hold a comfort fault long
+    enough for the engine to call it one?" -- and differ only in which verdict
+    they watch, so the tolerance rules live here once.
+    """
+
+    #: The ``COMFORT_*`` verdict that turns this flag on.
+    _verdict: str = COMFORT_OK
+    #: Which ``ComfortVerdict`` fields to publish as the explanation.
+    _attribute_keys: tuple[str, ...] = ()
+
+    def _comfort_verdict(self) -> Any:
+        """The analyser's verdict for this room, or ``None`` if unsampled."""
+        return self.coordinator.comfort.get(self._zone_id)
+
+    @property
+    def available(self) -> bool:
+        """Unknown is not a fault state.
+
+        The engine reports ``COMFORT_UNKNOWN`` both before the first sample and
+        afterwards whenever the room's temperature or target goes missing, so a
+        flag that stayed available would read as "checked, and fine" while
+        nothing had been checked at all.
+
+        ``is_on`` still publishes ``None`` rather than raising while unavailable:
+        Home Assistant writes the state once more as it tears an entity down, and
+        a property that only works while available would turn that write into a
+        logged error.
+        """
+        if not super().available:
+            return False
+        verdict = self._comfort_verdict()
+        return verdict is not None and verdict.verdict != COMFORT_UNKNOWN
+
+    @property
+    def is_on(self) -> bool | None:
+        """``None`` whenever there is no verdict that could be trusted."""
+        verdict = self._comfort_verdict()
+        if verdict is None or verdict.verdict == COMFORT_UNKNOWN:
+            return None
+        return verdict.verdict == self._verdict
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Show the measurement the verdict rests on, not just the verdict.
+
+        ``dwell_seconds`` is what separates this flag from a bare thermometer
+        comparison, and it depends on the analyser's configuration.  It is
+        reported as ``None`` rather than guessed when the engine does not
+        publish it -- an invented threshold would be worse than a missing one.
+        """
+        verdict = self._comfort_verdict()
+        attributes: dict[str, Any] = {
+            "verdict": None if verdict is None else verdict.verdict,
+            "dwell_seconds": _dwell_seconds(self.coordinator, self._verdict),
+        }
+        if verdict is None:
+            attributes["evaluated"] = False
+            return attributes
+        attributes["evaluated"] = True
+        detail = verdict.as_dict()
+        attributes.update({key: detail.get(key) for key in self._attribute_keys})
+        return attributes
+
+
+def _dwell_seconds(coordinator: ClimatePilotCoordinator, verdict: str) -> float | None:
+    """How long the fault must persist before the engine raises it.
+
+    Read from the analyser when it exposes its settings, otherwise reported as
+    unknown.  The flag never falls back to a module default, because a user who
+    retuned the dwell time would then be shown a threshold that is not in force.
+    """
+    analyser = getattr(coordinator, "comfort_analyser", None)
+    if analyser is None:
+        return None
+    if verdict == COMFORT_OVERHEATING:
+        value = getattr(analyser, "overheat_dwell", None)
+    else:
+        value = getattr(analyser, "underheat_dwell", None)
+    return None if value is None else float(value)
+
+
+class OverheatingBinarySensor(_ComfortBinarySensor):
+    """The room has held a temperature above its target for long enough to matter.
+
+    Not diagnostic: a permanently warm room is something the occupant wants to
+    see, not something to file away behind a diagnostic filter.
+    """
+
+    _verdict = COMFORT_OVERHEATING
+    _attribute_keys = (
+        "max_over",
+        "overheated_seconds",
+        "average_deviation",
+        "samples",
+        "reason_codes",
+    )
+
+    def __init__(self, coordinator: ClimatePilotCoordinator, zone_id: str) -> None:
+        super().__init__(coordinator, zone_id, "overheating")
+        self._attr_translation_key = "overheating"
+
+
+class UnderheatingBinarySensor(_ComfortBinarySensor):
+    """The room is below its target *and* genuinely asking for heat.
+
+    ``heat_request`` alone only says a valve is open; this flag says the demand
+    is not being met, which is the symptom worth acting on (a capacity or
+    hydraulics problem rather than a setpoint mistake).
+    """
+
+    _verdict = COMFORT_UNDERHEATING
+    _attribute_keys = (
+        "max_under",
+        "underheated_seconds",
+        "average_deviation",
+        "samples",
+        "reason_codes",
+    )
+
+    def __init__(self, coordinator: ClimatePilotCoordinator, zone_id: str) -> None:
+        super().__init__(coordinator, zone_id, "underheating")
+        self._attr_translation_key = "underheating"
+
+
 # ---------------------------------------------------------------------------
 # Platform setup
 # ---------------------------------------------------------------------------
@@ -226,6 +365,8 @@ async def async_setup_entry(
             (
                 ManualOverrideBinarySensor(coordinator, zone_id),
                 HeatRequestBinarySensor(coordinator, zone_id),
+                OverheatingBinarySensor(coordinator, zone_id),
+                UnderheatingBinarySensor(coordinator, zone_id),
             )
         )
 

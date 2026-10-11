@@ -8,7 +8,11 @@ by [HomeAxis](https://github.com/kaattz)
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-18BCF2.svg)](https://www.home-assistant.io/)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+> **v0.2.0 — 未部署到实机、未经现场验证。** 全部阈值与曲线均为设计建议值。
+> 见 [CHANGELOG.md](CHANGELOG.md)。
 
 </div>
 
@@ -90,6 +94,8 @@ KNX 面板没有 HA 用户身份，因此不能用 `context.user_id` 判断手�
 
 基于锅炉燃烧状态统计最近燃烧时长、1h/24h 点火次数、周期直方图与短循环告警。**区分采暖燃烧与生活热水燃烧**，避免把洗澡点火误判为地暖短循环。短循环默认**仅告警**，不修改锅炉内部安全流程。
 
+V0.2 在此之上增加**燃烧质量分级**（`cycling_quality`，只看采暖燃烧的平均时长）与**无需求点火计数**（`unexplained_burns_24h`），用于区分"地暖在短循环"与"锅炉因生活热水/自身逻辑点火"。
+
 ## 安装
 
 ### HACS（推荐）
@@ -146,6 +152,11 @@ cp -r /tmp/climatepilot/custom_components/climatepilot /config/custom_components
 | `sensor.<system>_supply_temperature` | 锅炉供水温度读数 |
 | `sensor.<system>_burner_starts_24h` | 24 小时点火次数 |
 | `sensor.<system>_last_burn_duration` | 最近一次燃烧时长 |
+| `sensor.<system>_dominant_zone_combination` | 24 小时内占比最高的需求组合（无需求时 `none`） |
+| `sensor.<system>_zone_combination_count` | 24 小时内出现过的不同需求组合数 |
+| `sensor.<system>_combinations_24h` | 组合 → 占比明细（JSON 属性） |
+| `sensor.<system>_cycling_quality` | 采暖燃烧质量：良好 / 一般 / 偏差 / 未知 |
+| `sensor.<system>_unexplained_burns_24h` | 无任何分区需求却点火的次数 |
 | `binary_sensor.<system>_short_cycle_alert` | 短循环告警 |
 | `binary_sensor.<system>_degraded` | 受限运行 |
 | `number.<system>_supply_temperature_override` | 手动设定供水温度 |
@@ -161,8 +172,12 @@ cp -r /tmp/climatepilot/custom_components/climatepilot /config/custom_components
 | `sensor.<room>_setpoint_source` | 手动覆盖 / 固定模式 / 日程 / 寒潮修正 / 辅助负载 / 缺省 |
 | `sensor.<room>_zone_temperature` | 房间温度 |
 | `sensor.<room>_override_remaining` | 手动覆盖剩余时间 |
+| `sensor.<room>_comfort_verdict` | 舒适判定：正常 / 过热 / 欠温 / 未知 |
+| `sensor.<room>_comfort_advice` | 处置建议码（见 [DEPLOYMENT 7.4](docs/DEPLOYMENT.md)） |
 | `binary_sensor.<room>_manual_override` | 手动覆盖中 |
 | `binary_sensor.<room>_heat_request` | 该房间真实在要热 |
+| `binary_sensor.<room>_overheating` | 持续高于目标 |
+| `binary_sensor.<room>_underheating` | 持续低于目标**且确实在要热** |
 | `button.<room>_resume_auto` | 立即恢复自动 |
 | `switch.<room>_auxiliary_load` | 该房间可作为辅助热负载 |
 
@@ -223,7 +238,9 @@ custom_components/climatepilot/
 ├── aux_load.py              # 有界辅助热负载（纯引擎）
 ├── weather_compensator.py   # 天气补偿（纯引擎）
 ├── heat_source.py           # 热源状态机（纯引擎）
-├── diagnostics_engine.py    # 燃烧统计（纯引擎）
+├── diagnostics_engine.py    # 燃烧统计与质量分级（纯引擎）
+├── zone_combinations.py     # 区域组合分析（纯引擎，V0.2）
+├── comfort_diagnostics.py   # 过热/欠温诊断（纯引擎，V0.2）
 ├── climate_adapter.py       # KNX/锅炉 climate 适配
 ├── store.py                 # 状态持久化与版本迁移
 ├── coordinator.py           # 唯一的 I/O 协调者
@@ -233,7 +250,7 @@ custom_components/climatepilot/
 └── diagnostics.py           # HA 诊断导出（脱敏）
 ```
 
-**架构约束：** `temperature_arbiter` / `zone_coordinator` / `aux_load` / `weather_compensator` / `heat_source` / `diagnostics_engine` 是**纯 Python 引擎**，不 import Home Assistant，因此其行为可以脱离 HA 独立测试，且所有时间由参数注入（不调用 `datetime.now()`）。
+**架构约束：** `temperature_arbiter` / `zone_coordinator` / `aux_load` / `weather_compensator` / `heat_source` / `diagnostics_engine` / `zone_combinations` / `comfort_diagnostics` 是**纯 Python 引擎**，不 import Home Assistant，因此其行为可以脱离 HA 独立测试，且所有时间由参数注入（不调用 `datetime.now()`）。
 
 **可解释性：** 每个写入决策都带原因码（`manual_override`、`schedule_transition`、`cold_adjustment`、`range_clamp`、`boiler_min_flow_unverified` 等），并暴露在实体属性中。
 
@@ -250,10 +267,32 @@ custom_components/climatepilot/
 
 ## 状态与路线图
 
-- **V0.1（当前）** — 温度仲裁、手动覆盖、日程、写入回声识别、需求聚合、热源状态机、天气补偿、诊断与恢复
-- **V0.2** — 辅助热负载与燃烧诊断增强、区域组合可视化
+- **V0.1** — 温度仲裁、手动覆盖、日程、写入回声识别、需求聚合、热源状态机、天气补偿、诊断与恢复
+- **V0.2（当前）** — ✅ 辅助热负载与燃烧诊断增强、✅ **区域组合变化分析**、✅ **过热/欠温诊断**、✅ **燃烧质量分级（区分采暖/生活热水）**、✅ **每房间/锅炉调度可视化**
 - **V0.3** — ESPHome 外贴回水/供水探头、ΔT 趋势与冷凝工况评估
 - **V1.0** — 多家庭部署、国际化、升级迁移、不同品牌适配器契约测试
+
+### V0.2 新增：诊断层
+
+V0.2 增加的全部是**只读诊断**，不改变控制行为：
+
+| 能力 | 实体 | 说明 |
+|---|---|---|
+| **区域组合分析** | `dominant_zone_combination` / `zone_combination_count` / `combinations_24h` | 统计哪些房间在**同时**要热、组合多零碎；抖动会被抑制，短区间不单独计数 |
+| **舒适度诊断** | 每房间 `comfort_verdict` / `comfort_advice` / `overheating` / `underheating` | 分房间判断过热与欠温，并给出可执行的建议码 |
+| **燃烧质量分级** | `cycling_quality` / `unexplained_burns_24h` | 按采暖燃烧平均时长分级（≥600s 良好 / ≥300s 一般 / <300s 偏差）；生活热水**不参与**判定 |
+
+> **⚠️ 这些是诊断建议，集成不会据此自动修改锅炉。** 不会自动改水温、不会自动启停、
+> 不会自动改房间目标。短循环检测同样**默认仅告警**。
+> `check_hydraulics_or_balancing` 尤其容易被误读——房间**没在要热**却偏冷，
+> 是阀门/执行器/水力平衡问题，**提高水温解决不了**。
+> 处置方法见 [docs/DEPLOYMENT.md 第 7.4 节](docs/DEPLOYMENT.md)。
+
+可视化面板见 [`dashboards/climatepilot.yaml`](dashboards/climatepilot.yaml)，
+导入说明见 [docs/DASHBOARD.md](docs/DASHBOARD.md)。
+
+> **部署状态**：V0.2 **未部署到实机、未经现场验证**，全部判据为设计建议值。
+> 详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可
 
@@ -262,3 +301,4 @@ MIT — 见 [LICENSE](LICENSE)
 ---
 
 *本文档描述的初始水温参数与曲线为**待现场验证**的建议值，不是热负荷计算结论。集成不宣称已通过所有锅炉型号的实机验证；锅炉启停与生活热水行为必须在你的设备上实测确认。*
+*V0.2 的区域组合、舒适度与燃烧质量诊断同样**未部署到实机、未经现场验证**，只输出建议，不会自动修改锅炉。*

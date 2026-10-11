@@ -71,6 +71,46 @@ def test_every_shipped_translation_key_exists_in_strings():
     assert not missing, f"translation keys missing from strings.json: {missing}"
 
 
+def test_no_orphan_entity_translation_keys():
+    """The reverse direction: a key documented but never implemented.
+
+    ``test_every_shipped_translation_key_exists_in_strings`` catches the case
+    where a platform ships a key with no translation. This catches the mirror
+    image - a translation left behind after its entity was renamed or removed.
+    Home Assistant ignores such a key silently, so without this test it survives
+    indefinitely and the *next* reader trusts a label for an entity that does
+    not exist.
+
+    The comparison is deliberately exact and two-way: an entity key must exist in
+    strings.json (upward) *and* strings.json must not describe an entity key no
+    platform ships (downward).
+    """
+    strings = load_strings()
+    documented = strings.get("entity", {})
+
+    implemented: dict[str, set[str]] = {}
+    for path in platform_files():
+        keys = set(
+            re.findall(r'_attr_translation_key\s*=\s*"([^"]+)"', path.read_text(encoding="utf-8"))
+        )
+        if keys:
+            implemented[path.stem] = keys
+
+    orphans = {
+        platform: sorted(set(documented.get(platform, {})) - implemented.get(platform, set()))
+        for platform in documented
+    }
+    orphans = {platform: keys for platform, keys in orphans.items() if keys}
+    assert not orphans, f"entity translation keys with no implementing entity: {orphans}"
+
+    # A platform dictionary with no module at all is also an orphan (e.g. the
+    # section was kept after the platform file was deleted).
+    stray_platforms = sorted(set(documented) - set(implemented))
+    assert not stray_platforms, (
+        f"strings.json declares entity sections for platforms that ship no module: {stray_platforms}"
+    )
+
+
 def test_state_translations_cover_the_constants_actually_used():
     """Sensor states are enum values; each needs a ``state`` translation."""
     strings = load_strings()
@@ -112,6 +152,61 @@ def test_state_translations_cover_the_constants_actually_used():
         SOURCE_FALLBACK,
     }
     assert sources <= documented, sorted(sources - documented)
+
+
+def test_v02_state_translations_match_the_constants_exactly():
+    """The V0.2 enum sensors must be translated *exactly*, not merely covered.
+
+    A typo in one of these literal keys is invisible in code review but shows up
+    in the UI as the raw code (``check_hydraulics_or_balancing``), so the
+    documented set is compared both ways against ``const`` rather than by subset.
+    """
+    from custom_components.climatepilot.const import (
+        ADVICE_CHECK_HYDRAULICS,
+        ADVICE_CHECK_SCHEDULE,
+        ADVICE_LOWER_SUPPLY,
+        ADVICE_NONE,
+        ADVICE_RAISE_SUPPLY,
+        COMFORT_OK,
+        COMFORT_OVERHEATING,
+        COMFORT_UNDERHEATING,
+        COMFORT_UNKNOWN,
+        QUALITY_FAIR,
+        QUALITY_GOOD,
+        QUALITY_POOR,
+        QUALITY_UNKNOWN,
+    )
+
+    expected = {
+        "comfort_verdict": {
+            COMFORT_OK,
+            COMFORT_OVERHEATING,
+            COMFORT_UNDERHEATING,
+            COMFORT_UNKNOWN,
+        },
+        "comfort_advice": {
+            ADVICE_LOWER_SUPPLY,
+            ADVICE_RAISE_SUPPLY,
+            ADVICE_CHECK_HYDRAULICS,
+            ADVICE_CHECK_SCHEDULE,
+            ADVICE_NONE,
+        },
+        "cycling_quality": {QUALITY_GOOD, QUALITY_FAIR, QUALITY_POOR, QUALITY_UNKNOWN},
+    }
+
+    for name, path in (
+        ("strings.json", COMPONENT / "strings.json"),
+        ("en.json", COMPONENT / "translations" / "en.json"),
+        ("zh-Hans.json", COMPONENT / "translations" / "zh-Hans.json"),
+    ):
+        entity = json.loads(path.read_text(encoding="utf-8"))["entity"]["sensor"]
+        for key, literals in expected.items():
+            documented = set(entity[key].get("state", {}))
+            assert documented == literals, (
+                f"{name}: sensor.{key} state keys differ from const.py: "
+                f"missing={sorted(literals - documented)}, "
+                f"unknown={sorted(documented - literals)}"
+            )
 
 
 def test_translations_have_the_same_key_shape_as_strings():

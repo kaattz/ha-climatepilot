@@ -46,9 +46,15 @@ except Exception:  # pragma: no cover - defensive fallback
 
 from custom_components.climatepilot import diagnostics_engine as de
 from custom_components.climatepilot.const import (
+    CIRCUIT_DHW,
+    CIRCUIT_HEATING,
     DEFAULT_SHORT_CYCLE_SECONDS,
     FEEDBACK_UNCERTAIN,
     FEEDBACK_VALID,
+    QUALITY_FAIR,
+    QUALITY_GOOD,
+    QUALITY_POOR,
+    QUALITY_UNKNOWN,
 )
 from custom_components.climatepilot.diagnostics_engine import (
     HISTOGRAM_BINS,
@@ -579,3 +585,551 @@ def test_many_burns_do_not_grow_state_without_bound() -> None:
     persisted = stats.snapshot(now)["persist"]
     assert len(persisted["starts"]) <= 512
     assert len(persisted["cycles"]) <= 512
+
+
+# ===========================================================================
+# V0.2 - docs/INTERFACES_V0.2.md 3.3
+# ===========================================================================
+#
+# Two hard requirements drive this block:
+#
+# 1. **An error is not a burn.** ``Error`` (code 33 on the target Rinnai
+#    REB-A2747FF-CH) falling through to the old generic-burning fallback would
+#    count a lockout as an ignition and could fabricate a short-cycle alarm.
+# 2. **The circuit disambiguates the vocabulary.** That device spells its
+#    space-heating and DHW burner states identically (``Burning`` = 32,
+#    ``Heating Water`` = 31), so the token alone cannot be attributed.
+
+
+# ---------------------------------------------------------------------------
+# SAFETY: an error must never be counted as a burn
+# ---------------------------------------------------------------------------
+def test_error_state_is_not_burning() -> None:
+    """Regression: ``Error`` used to fall through to the generic-burning branch."""
+    assert classify_burner_state("Error") == (False, None, True)
+    assert classify_burner_state("error") == (False, None, True)
+
+
+@pytest.mark.parametrize("state", ["Error", "fault", "lockout", "alarm", "FAILED", "blocked"])
+def test_fault_tokens_are_known_and_not_burning(state: str) -> None:
+    burning, _, known = classify_burner_state(state)
+    assert known is True
+    assert burning is False
+
+
+def test_error_state_does_not_create_an_ignition() -> None:
+    stats = BurnerStats()
+    stats.note_state("Error", T0)
+    snap = stats.snapshot(T0 + timedelta(seconds=60))
+
+    assert snap["starts_24h"] == 0
+    assert snap["burns_24h"] == 0
+    assert snap["burning"] is False
+    assert snap["last_duration"] is None
+
+
+def test_error_state_cannot_fabricate_a_short_cycle_alarm() -> None:
+    """The alarm is the one signal a user acts on, so it must not be faked."""
+    stats = BurnerStats(short_cycle_seconds=300.0)
+    for offset in range(0, 600, 60):
+        stats.note_state("Error", T0 + timedelta(seconds=offset))
+    snap = stats.snapshot(T0 + timedelta(seconds=700))
+
+    assert snap["short_cycles_24h"] == 0
+    assert snap["short_cycle_alert"] is False
+
+
+def test_error_state_closes_an_open_burn_without_adding_an_ignition() -> None:
+    stats = BurnerStats()
+    stats.note_state("heating", T0)
+    stats.note_state("Error", T0 + timedelta(seconds=400))
+    snap = stats.snapshot(T0 + timedelta(seconds=500))
+
+    assert snap["starts_24h"] == 1  # only the real burn
+    assert snap["burning"] is False
+    assert snap["last_duration"] == pytest.approx(400.0)
+    assert snap["error_state"] is True
+
+
+def test_error_state_is_exposed_on_the_snapshot() -> None:
+    stats = BurnerStats()
+    stats.note_state("Error", T0)
+    assert stats.snapshot(T0)["error_state"] is True
+
+    stats.note_state("heating", T0 + timedelta(seconds=60))
+    assert stats.snapshot(T0 + timedelta(seconds=90))["error_state"] is False
+
+
+# ---------------------------------------------------------------------------
+# SAFETY: an unrecognised token is not a burn
+# ---------------------------------------------------------------------------
+def test_unrecognised_token_does_not_invent_an_ignition() -> None:
+    """No information must not be guessed as "burning"."""
+    stats = BurnerStats()
+    stats.note_state("0x51f", T0)
+    snap = stats.snapshot(T0 + timedelta(seconds=600))
+
+    assert snap["starts_24h"] == 0
+    assert snap["burning"] is False
+    assert snap["state_known"] is False
+    assert snap["quality"] == FEEDBACK_UNCERTAIN
+
+
+def test_unrecognised_token_holds_an_ongoing_burn() -> None:
+    """Treated like a feed loss: hold, never fabricate flame-off or flame-on."""
+    stats = BurnerStats()
+    stats.note_state("heating", T0)
+    stats.note_state("0x51f", T0 + timedelta(seconds=60))
+    snap = stats.snapshot(T0 + timedelta(seconds=600))
+
+    assert snap["burning"] is True
+    assert snap["starts_24h"] == 1
+    assert snap["current_duration"] == pytest.approx(600.0)
+
+
+def test_unrecognised_token_in_a_known_circuit_is_attributed_to_that_circuit() -> None:
+    """On the space-heating sensor, "something is burning" IS space heating."""
+    heating = BurnerStats(circuit=CIRCUIT_HEATING)
+    heating.note_state("0x51f", T0)
+    assert heating.snapshot(T0 + timedelta(seconds=600))["kind"] == KIND_HEATING
+
+    dhw = BurnerStats(circuit=CIRCUIT_DHW)
+    dhw.note_state("0x51f", T0)
+    assert dhw.snapshot(T0 + timedelta(seconds=600))["kind"] == KIND_DHW
+
+
+# ---------------------------------------------------------------------------
+# SAFETY: the circuit disambiguates the shared Rinnai vocabulary
+# ---------------------------------------------------------------------------
+def test_heating_water_is_recognised_on_the_heating_circuit() -> None:
+    """Rinnai code 31 on ``sensor.heating_burning_state`` means space heating."""
+    assert classify_burner_state("Heating Water", circuit=CIRCUIT_HEATING) == (
+        True,
+        KIND_HEATING,
+        True,
+    )
+    assert classify_burner_state("Burning", circuit=CIRCUIT_HEATING) == (
+        True,
+        KIND_HEATING,
+        True,
+    )
+
+
+def test_same_token_on_the_dhw_circuit_is_dhw() -> None:
+    """The identical spelling on ``sensor.hot_water_burning_state`` is DHW."""
+    assert classify_burner_state("Heating Water", circuit=CIRCUIT_DHW) == (
+        True,
+        KIND_DHW,
+        True,
+    )
+    assert classify_burner_state("Burning", circuit=CIRCUIT_DHW) == (
+        True,
+        KIND_DHW,
+        True,
+    )
+
+
+def test_shared_token_without_a_circuit_stays_unattributed() -> None:
+    assert classify_burner_state("Heating Water") == (True, KIND_UNKNOWN, True)
+    assert classify_burner_state("Burning") == (True, KIND_UNKNOWN, True)
+
+
+def test_rinnai_heating_sensor_makes_cycling_quality_work_end_to_end() -> None:
+    """The V0.2 headline feature on the real device's vocabulary.
+
+    Without circuit awareness these burns were all ``unknown``, so
+    ``grade_heating_24h`` stayed empty and ``cycling_quality`` was permanently
+    ``unknown`` - the feature was inert on the target hardware.
+    """
+    stats = BurnerStats(circuit=CIRCUIT_HEATING)
+    burn(stats, T0, 900.0, kind_state="Heating Water")
+    burn(stats, T0 + timedelta(hours=1), 900.0, kind_state="Burning")
+    snap = stats.snapshot(T0 + timedelta(hours=2))
+
+    assert snap["heating_starts_24h"] == 2
+    assert snap["unknown_kind_starts_24h"] == 0
+    assert snap["grade_heating_24h"] == {"good": 2, "fair": 0, "poor": 0}
+    assert snap["cycling_quality"] == "good"
+
+
+def test_rinnai_standby_is_off() -> None:
+    assert classify_burner_state("Standby", circuit=CIRCUIT_HEATING) == (False, None, True)
+    assert classify_burner_state("Standby", circuit=CIRCUIT_DHW) == (False, None, True)
+
+
+def test_rinnai_error_is_not_a_burn_on_either_circuit() -> None:
+    assert classify_burner_state("Error", circuit=CIRCUIT_HEATING) == (False, None, True)
+    assert classify_burner_state("Error", circuit=CIRCUIT_DHW) == (False, None, True)
+
+
+@pytest.mark.parametrize(
+    ("raw", "circuit", "expected"),
+    [
+        # The Rinnai REB-A2747FF-CH vocabulary, by name and by raw code.
+        # "Heating Water" (31) is this device's *space heating* state.
+        ("Standby", CIRCUIT_HEATING, (False, None, True)),
+        ("30", CIRCUIT_HEATING, (False, None, True)),
+        ("Standby", CIRCUIT_DHW, (False, None, True)),
+        ("30", CIRCUIT_DHW, (False, None, True)),
+        ("Heating Water", CIRCUIT_HEATING, (True, KIND_HEATING, True)),
+        ("31", CIRCUIT_HEATING, (True, KIND_HEATING, True)),
+        ("Burning", CIRCUIT_HEATING, (True, KIND_HEATING, True)),
+        ("32", CIRCUIT_HEATING, (True, KIND_HEATING, True)),
+        ("Heating Water", CIRCUIT_DHW, (True, KIND_DHW, True)),
+        ("31", CIRCUIT_DHW, (True, KIND_DHW, True)),
+        ("Burning", CIRCUIT_DHW, (True, KIND_DHW, True)),
+        ("32", CIRCUIT_DHW, (True, KIND_DHW, True)),
+        # Error (33) is never a burn, on either circuit.
+        ("Error", CIRCUIT_HEATING, (False, None, True)),
+        ("33", CIRCUIT_HEATING, (False, None, True)),
+        ("Error", CIRCUIT_DHW, (False, None, True)),
+        ("33", CIRCUIT_DHW, (False, None, True)),
+        # Shared spelling with no circuit: burning, but honestly unattributed.
+        ("Heating Water", None, (True, KIND_UNKNOWN, True)),
+        ("Burning", None, (True, KIND_UNKNOWN, True)),
+        # A closed, specific vocabulary: an unseen token on a known circuit is a
+        # burn on that circuit rather than a silent "no data" on every refresh.
+        ("some-future-token", CIRCUIT_HEATING, (True, KIND_HEATING, True)),
+        ("some-future-token", CIRCUIT_DHW, (True, KIND_DHW, True)),
+        ("some-future-token", None, (False, None, False)),
+    ],
+)
+def test_rinnai_vocabulary_matrix(raw, circuit, expected) -> None:
+    assert classify_burner_state(raw, circuit=circuit) == expected
+
+
+def test_no_reading_holds_on_every_circuit() -> None:
+    for circuit in (CIRCUIT_HEATING, CIRCUIT_DHW, None):
+        for token in (None, "unknown", "unavailable", ""):
+            assert classify_burner_state(token, circuit=circuit) == (False, None, False)
+
+
+def test_dhw_circuit_burns_are_classified_as_dhw() -> None:
+    stats = BurnerStats(circuit=CIRCUIT_DHW)
+    burn(stats, T0, 900.0, kind_state="Heating Water")
+    snap = stats.snapshot(T0 + timedelta(seconds=1000))
+
+    assert snap["dhw_starts_24h"] == 1
+    assert snap["heating_starts_24h"] == 0
+    assert snap["includes_dhw"] is True
+
+
+# ---------------------------------------------------------------------------
+# V0.2 snapshot keys
+# ---------------------------------------------------------------------------
+def test_v02_snapshot_keys_exist() -> None:
+    snap = BurnerStats().snapshot(T0)
+    for key in (
+        "cycling_quality",
+        "cycling_quality_reason",
+        "unexplained_burns_24h",
+        "grade_heating_24h",
+        "grade_dhw_24h",
+    ):
+        assert key in snap, f"missing V0.2 snapshot key: {key}"
+
+
+def test_v01_snapshot_keys_are_not_renamed_or_removed() -> None:
+    """Regression: the V0.1 platform layer reads all of these."""
+    snap = BurnerStats().snapshot(T0)
+    for key in (
+        "state",
+        "state_known",
+        "quality",
+        "burning",
+        "kind",
+        "includes_dhw",
+        "last_duration",
+        "last_duration_kind",
+        "last_started_at",
+        "last_ended_at",
+        "current_duration",
+        "starts_1h",
+        "starts_24h",
+        "starts_total",
+        "heating_starts_24h",
+        "dhw_starts_24h",
+        "unknown_kind_starts_24h",
+        "burns_24h",
+        "runtime_24h",
+        "heating_runtime_24h",
+        "dhw_runtime_24h",
+        "short_cycles_24h",
+        "short_cycle_alert",
+        "short_cycle_seconds",
+        "histogram",
+        "histogram_heating",
+        "histogram_window_seconds",
+        "demand_active",
+        "burns_without_demand_24h",
+        "persist",
+    ):
+        assert key in snap, f"V0.1 snapshot key disappeared: {key}"
+
+
+def test_cycling_quality_is_unknown_without_heating_burns() -> None:
+    """Nothing observed must not read as a fault."""
+    snap = BurnerStats().snapshot(T0)
+    assert snap["cycling_quality"] == QUALITY_UNKNOWN
+    assert "no heating burns" in snap["cycling_quality_reason"]
+
+
+def test_cycling_quality_grades_on_the_average_heating_burn() -> None:
+    stats = BurnerStats()
+    burn(stats, T0, 900.0)  # 15 min -> good (>= 600 s)
+    burn(stats, T0 + timedelta(hours=1), 900.0)
+    snap = stats.snapshot(T0 + timedelta(hours=2))
+
+    assert snap["cycling_quality"] == QUALITY_GOOD
+    assert snap["cycling_quality_reason"] == "average 900s over 2 heating burns"
+
+
+def test_cycling_quality_fair_band() -> None:
+    stats = BurnerStats()
+    burn(stats, T0, 400.0)  # between poor (300) and good (600)
+    snap = stats.snapshot(T0 + timedelta(seconds=500))
+    assert snap["cycling_quality"] == QUALITY_FAIR
+
+
+def test_cycling_quality_poor_band() -> None:
+    stats = BurnerStats()
+    burn(stats, T0, 120.0)  # under 300 s
+    snap = stats.snapshot(T0 + timedelta(seconds=200))
+    assert snap["cycling_quality"] == QUALITY_POOR
+
+
+@pytest.mark.parametrize(
+    ("duration", "expected"),
+    [
+        (299.9, QUALITY_POOR),
+        (300.0, QUALITY_FAIR),  # inclusive lower bound
+        (599.9, QUALITY_FAIR),
+        (600.0, QUALITY_GOOD),  # inclusive lower bound
+        (3600.0, QUALITY_GOOD),
+    ],
+)
+def test_cycling_quality_band_boundaries(duration: float, expected: str) -> None:
+    stats = BurnerStats()
+    burn(stats, T0, duration)
+    assert stats.snapshot(T0 + timedelta(seconds=duration + 60))["cycling_quality"] == expected
+
+
+def test_cycling_quality_thresholds_are_configurable() -> None:
+    stats = BurnerStats(cycling_good_seconds=1200.0, cycling_poor_seconds=600.0)
+    burn(stats, T0, 900.0)
+    snap = stats.snapshot(T0 + timedelta(seconds=1000))
+    assert snap["cycling_quality"] == QUALITY_FAIR
+
+
+# ---------------------------------------------------------------------------
+# SAFETY: DHW must not pull the heating grade down
+# ---------------------------------------------------------------------------
+def test_dhw_burn_does_not_lower_the_heating_quality() -> None:
+    """A shower must not be able to downgrade the space-heating verdict."""
+    stats = BurnerStats()
+    burn(stats, T0, 900.0, kind_state="heating")  # good
+    burn(stats, T0 + timedelta(hours=1), 60.0, kind_state="dhw")  # very short
+    snap = stats.snapshot(T0 + timedelta(hours=2))
+
+    assert snap["cycling_quality"] == QUALITY_GOOD
+    assert "over 1 heating burns" in snap["cycling_quality_reason"]
+    # The DHW burn is graded separately instead.
+    assert snap["grade_heating_24h"] == {"good": 1, "fair": 0, "poor": 0}
+    assert snap["grade_dhw_24h"] == {"good": 0, "fair": 0, "poor": 1}
+
+
+def test_dhw_only_window_leaves_heating_quality_unknown() -> None:
+    stats = BurnerStats()
+    burn(stats, T0, 60.0, kind_state="dhw")
+    snap = stats.snapshot(T0 + timedelta(seconds=200))
+
+    assert snap["cycling_quality"] == QUALITY_UNKNOWN
+    assert snap["grade_heating_24h"] == {"good": 0, "fair": 0, "poor": 0}
+    assert snap["grade_dhw_24h"] == {"good": 0, "fair": 0, "poor": 1}
+
+
+def test_unattributable_burns_still_feed_the_heating_grade() -> None:
+    """A generic ``on`` burner cannot be proven DHW, so it counts as heating."""
+    stats = BurnerStats()
+    burn(stats, T0, 900.0, kind_state="on")
+    snap = stats.snapshot(T0 + timedelta(seconds=1000))
+
+    assert snap["cycling_quality"] == QUALITY_GOOD
+    assert snap["grade_heating_24h"] == {"good": 1, "fair": 0, "poor": 0}
+    assert snap["includes_dhw"] is True
+
+
+def test_grade_histograms_always_expose_all_three_bands() -> None:
+    stats = BurnerStats()
+    snap = stats.snapshot(T0)
+    for key in ("grade_heating_24h", "grade_dhw_24h"):
+        assert set(snap[key]) == {QUALITY_GOOD, QUALITY_FAIR, QUALITY_POOR}
+
+
+def test_grades_mix_bands_correctly() -> None:
+    stats = BurnerStats()
+    burn(stats, T0, 900.0)  # good
+    burn(stats, T0 + timedelta(hours=1), 400.0)  # fair
+    burn(stats, T0 + timedelta(hours=2), 120.0)  # poor
+    snap = stats.snapshot(T0 + timedelta(hours=3))
+
+    assert snap["grade_heating_24h"] == {"good": 1, "fair": 1, "poor": 1}
+    # Average = 473 s -> fair.
+    assert snap["cycling_quality"] == QUALITY_FAIR
+
+
+def test_grades_respect_the_24h_window() -> None:
+    stats = BurnerStats()
+    burn(stats, T0, 900.0)
+    snap = stats.snapshot(T0 + timedelta(hours=48))
+
+    assert snap["grade_heating_24h"] == {"good": 0, "fair": 0, "poor": 0}
+    assert snap["cycling_quality"] == QUALITY_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# unexplained_burns_24h
+# ---------------------------------------------------------------------------
+def test_unexplained_burns_24h_aliases_burns_without_demand() -> None:
+    stats = BurnerStats()
+    stats.note_demand(T0, False)
+    burn(stats, T0 + timedelta(seconds=10), 300.0)
+    snap = stats.snapshot(T0 + timedelta(seconds=400))
+
+    assert snap["unexplained_burns_24h"] == 1
+    assert snap["unexplained_burns_24h"] == snap["burns_without_demand_24h"]
+
+
+def test_unexplained_burns_is_zero_when_demand_existed() -> None:
+    stats = BurnerStats()
+    stats.note_demand(T0, True)
+    burn(stats, T0 + timedelta(seconds=10), 300.0)
+    assert stats.snapshot(T0 + timedelta(seconds=400))["unexplained_burns_24h"] == 0
+
+
+def test_note_demand_flag_survives_note_state() -> None:
+    """The coordinator calls note_demand(now, ...) then note_state(source, now)."""
+    stats = BurnerStats()
+    stats.note_demand(T0, False)
+    stats.note_state("heating", T0 + timedelta(seconds=10))
+    snap = stats.snapshot(T0 + timedelta(seconds=400))
+
+    assert snap["demand_active"] is False
+    assert snap["unexplained_burns_24h"] == 1
+
+
+# ---------------------------------------------------------------------------
+# short_cycle_alert semantics are unchanged
+# ---------------------------------------------------------------------------
+def test_short_cycle_alert_semantics_unchanged_by_v02() -> None:
+    """Heating + unattributable only, never DHW; alarm at the same threshold."""
+    stats = BurnerStats(short_cycle_seconds=300.0, circuit=CIRCUIT_HEATING)
+    burn(stats, T0, 60.0, kind_state="Burning")
+    snap = stats.snapshot(T0 + timedelta(seconds=120))
+
+    assert snap["short_cycles_24h"] == 1
+    assert snap["short_cycle_alert"] is True
+
+
+def test_dhw_short_burn_still_raises_no_alert_under_v02() -> None:
+    stats = BurnerStats(short_cycle_seconds=300.0, circuit=CIRCUIT_DHW)
+    burn(stats, T0, 60.0, kind_state="Heating Water")
+    snap = stats.snapshot(T0 + timedelta(seconds=120))
+
+    assert snap["short_cycles_24h"] == 0
+    assert snap["short_cycle_alert"] is False
+    # ...while still being graded as DHW quality.
+    assert snap["grade_dhw_24h"] == {"good": 0, "fair": 0, "poor": 1}
+
+
+# ---------------------------------------------------------------------------
+# Persistence: V0.1 payloads and the new error flag
+# ---------------------------------------------------------------------------
+def test_restore_of_a_v01_payload_without_new_fields() -> None:
+    """An upgrade must not break on state written by V0.1."""
+    stats = BurnerStats()
+    stats.restore(
+        {
+            "state": "off",
+            "burning": False,
+            "kind": None,
+            "unknown": False,
+            "burn_start": None,
+            "last_duration": 900.0,
+            "last_duration_kind": KIND_HEATING,
+            "starts_total": 2,
+            "demand_active": True,
+            "starts": [[T0.isoformat(), KIND_HEATING]],
+            "cycles": [[(T0 + timedelta(seconds=900)).isoformat(), 900.0, KIND_HEATING]],
+            "burns_without_demand": [],
+        }
+    )
+    snap = stats.snapshot(T0 + timedelta(hours=1))
+    assert snap["starts_total"] == 2
+    assert snap["last_duration"] == pytest.approx(900.0)
+    assert snap["grade_heating_24h"] == {"good": 1, "fair": 0, "poor": 0}
+
+
+def test_v02_snapshot_restore_round_trip_keeps_quality() -> None:
+    stats = BurnerStats(circuit=CIRCUIT_HEATING)
+    burn(stats, T0, 900.0, kind_state="Burning")
+    burn(stats, T0 + timedelta(hours=1), 120.0, kind_state="Burning")
+    now = T0 + timedelta(hours=2)
+
+    restored = BurnerStats(circuit=CIRCUIT_HEATING)
+    restored.restore(stats.snapshot(now))
+    before = stats.snapshot(now)
+    after = restored.snapshot(now)
+
+    for key in (
+        "cycling_quality",
+        "cycling_quality_reason",
+        "unexplained_burns_24h",
+        "grade_heating_24h",
+        "grade_dhw_24h",
+        "short_cycle_alert",
+    ):
+        assert after[key] == before[key], key
+
+
+def test_restore_round_trips_the_error_flag() -> None:
+    stats = BurnerStats()
+    stats.note_state("Error", T0)
+
+    restored = BurnerStats()
+    restored.restore(stats.snapshot(T0 + timedelta(seconds=10)))
+    assert restored.snapshot(T0 + timedelta(seconds=20))["error_state"] is True
+
+
+def test_restore_rederives_the_error_flag_for_a_v01_payload() -> None:
+    """V0.1 had no ``error`` key; the last state still tells us."""
+    stats = BurnerStats()
+    stats.restore({"state": "Error", "burning": False})
+    assert stats.snapshot(T0)["error_state"] is True
+
+
+def test_restore_drops_a_phantom_burn_left_open_by_an_error_state() -> None:
+    """A torn payload must not resurrect a burn that an error already ended."""
+    stats = BurnerStats()
+    stats.restore(
+        {
+            "state": "Error",
+            "error": True,
+            "burning": True,
+            "kind": KIND_HEATING,
+            "burn_start": T0.isoformat(),
+        }
+    )
+    snap = stats.snapshot(T0 + timedelta(seconds=60))
+    assert snap["burning"] is False
+    assert snap["current_duration"] is None
+
+
+def test_v02_restore_is_tolerant_of_garbage() -> None:
+    stats = BurnerStats(circuit=CIRCUIT_HEATING)
+    stats.restore({})
+    stats.restore({"error": "yes", "cycles": "nonsense", "starts": 5})
+    snap = stats.snapshot(T0)
+    assert snap["cycling_quality"] == QUALITY_UNKNOWN
+    assert snap["grade_dhw_24h"] == {"good": 0, "fair": 0, "poor": 0}
+    assert snap["unexplained_burns_24h"] == 0

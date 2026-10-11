@@ -54,6 +54,38 @@ BOILER = "climate.rinnai_heating_control"
 BURNER = "sensor.heating_burning_state"
 OUTDOOR = "sensor.heweather_outside_temperature"
 
+#: Entity inventory for the two-zone installation configured below, as
+#: (system-level, per-zone) per platform, derived from the translation keys in
+#: ``strings.json``. The total is computed from the formula rather than pinned.
+#:
+#: Why the formula: V0.1 pinned a bare ``31`` here and a bare ``39`` in
+#: ``test_platform_entities.py``. Both were arithmetically right, but neither
+#: said *what it counted* - a different zone count (2 vs 3) and a different
+#: platform set (that file builds no climate entity) - so a reader cannot tell a
+#: correct total from a stale one. Writing the two axes out makes the next
+#: change mechanical instead of archaeological.
+ZONE_COUNT = 2
+EXPECTED_PER_PLATFORM = {
+    "sensor": (12, 6),
+    "binary_sensor": (2, 4),
+    "select": (1, 1),
+    "button": (1, 1),
+    "number": (1, 0),
+    "switch": (0, 1),
+    "climate": (1, 0),
+}
+EXPECTED_ENTITY_TOTAL = sum(
+    system + ZONE_COUNT * per_zone for system, per_zone in EXPECTED_PER_PLATFORM.values()
+)
+#: V0.1 shipped 31 for this same installation: 13 system-level + 2 zones x 9.
+#: V0.2 adds five system-level sensors and four entities per room. Kept as a
+#: named constant (not inlined into the total) so a future V0.3 extends this sum
+#: instead of rewriting the one number that records what V0.1 actually shipped.
+V01_ENTITY_TOTAL = 31
+V02_ADDED = (EXPECTED_PER_PLATFORM["sensor"][0] - 7) + ZONE_COUNT * (
+    (EXPECTED_PER_PLATFORM["sensor"][1] - 4) + (EXPECTED_PER_PLATFORM["binary_sensor"][1] - 2)
+)
+
 
 @pytest.fixture()
 async def hass(tmp_path):
@@ -291,7 +323,12 @@ async def test_expected_entities_are_registered(hass):
     # Assert on translation keys via unique_id, because the entity_id slug is
     # derived from the *translated* device name and is not a stable contract.
     suffixes = {eid.split(".", 1)[1] for eid in ids}
-    assert len(ids) == 31, f"expected 31 entities for 2 zones, got {len(ids)}: {sorted(ids)}"
+    assert len(ids) == EXPECTED_ENTITY_TOTAL, (
+        f"expected {EXPECTED_ENTITY_TOTAL} entities for {ZONE_COUNT} zones "
+        f"(V0.1's {V01_ENTITY_TOTAL} + {V02_ADDED} V0.2 additions), "
+        f"got {len(ids)}: {sorted(ids)}"
+    )
+    assert EXPECTED_ENTITY_TOTAL == V01_ENTITY_TOTAL + V02_ADDED
 
     for suffix in (
         "control_mode",
@@ -323,6 +360,97 @@ async def test_expected_entities_are_registered(hass):
     ):
         matches = [name for name in suffixes if name.endswith(suffix)]
         assert len(matches) == 2, f"{suffix}: expected 2, got {matches}"
+
+
+async def test_v02_entities_are_registered(hass):
+    """The V0.2 additions must reach the real entity registry.
+
+    Checked by entity_id suffix rather than by unique_id because this is the
+    layer that exercises Home Assistant's own naming: the suffix is slugified
+    from the *English* name (see ``test_dashboard_entity_ids_exist_in_the_registry``
+    for why), so a translation that loses a key shows up here as a missing
+    entity rather than as a blank card later.
+    """
+    await setup_entry(hass)
+    suffixes = {eid.split(".", 1)[1] for eid in registered_entities(hass)}
+
+    for suffix in (
+        "dominant_zone_combination",
+        "distinct_zone_combinations_24_h",
+        "zone_combination_breakdown_24_h",
+        "combustion_quality",
+        "unexplained_burner_starts_24_h",
+    ):
+        assert any(name.endswith(suffix) for name in suffixes), f"missing {suffix}"
+
+    for suffix in ("comfort_verdict", "comfort_advice", "overheating", "underheating"):
+        matches = [name for name in suffixes if name.endswith(suffix)]
+        assert len(matches) == ZONE_COUNT, f"{suffix}: expected {ZONE_COUNT}, got {matches}"
+
+
+async def test_dashboard_entity_ids_exist_in_the_registry(hass):
+    """The shipped dashboard must resolve against the *real* registry.
+
+    This is the authoritative check, and it exists because the weaker version of
+    it already failed once: ``test_platform_entities`` derives the expected ids
+    from ``translations/en.json`` with HA's own ``slugify``, but if the
+    derivation rule is itself wrong the test is self-consistent and green while
+    the dashboard is broken. Here there is no derivation at all - the ids come
+    out of a booted Home Assistant's ``entity_registry`` - so the two sides
+    cannot share a mistaken assumption.
+
+    The ``hass`` fixture is left at its default language on purpose. The rule
+    under test is that a *non*-native-id language still produces English ids, and
+    this fixture is what catches a future HA change to that behaviour.
+    """
+    import re
+
+    import yaml
+
+    await setup_entry(hass)
+    real = registered_entities(hass)
+
+    # Parse instead of text-scanning: a commented-out card must not count as a
+    # live reference, or a genuinely missing card would look present.
+    dashboard = ROOT / "dashboards" / "climatepilot.yaml"
+    document = yaml.safe_load(dashboard.read_text(encoding="utf-8"))
+    referenced: set[str] = set()
+    stack: list[object] = [document]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, str):
+            referenced.update(
+                re.findall(
+                    r"\b(?:sensor|binary_sensor|select|button|number|switch|climate)\.[a-z0-9_]+",
+                    node,
+                )
+            )
+
+    # The KNX thermostats are the user's entities, created by their own
+    # integration, so they are legitimately absent from *our* registry.
+    user_owned = {"climate.livingroom_floorheating", "climate.master_bedroom_floorheating"}
+    ours = referenced - user_owned
+
+    unresolved = sorted(ours - real)
+    assert not unresolved, (
+        f"dashboard references entity ids this installation does not create: {unresolved}. "
+        f"Real ids are: {sorted(real)}"
+    )
+
+    # And the panel must not have quietly dropped entities either.
+    unused = sorted(real - referenced)
+    assert not unused, f"registered entities missing from the dashboard: {unused}"
+
+    # Sanity-check the fixture itself: the reference install derives ids from the
+    # configured system name ("我的家" -> "wo_de_jia") and room names.
+    assert all(
+        eid.split(".", 1)[1].startswith(("wo_de_jia", "ke_ting_di_nuan", "zhu_wo_di_nuan"))
+        for eid in real
+    ), f"unexpected naming scheme in the registry: {sorted(real)}"
 
 
 async def test_registry_entries_have_unique_ids_and_devices(hass):

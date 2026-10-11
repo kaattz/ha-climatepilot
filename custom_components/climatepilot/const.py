@@ -25,6 +25,12 @@ CONF_SYSTEM_NAME: Final = "system_name"
 CONF_BOILER_ENTITY: Final = "boiler_entity"
 CONF_OUTDOOR_TEMP_ENTITY: Final = "outdoor_temperature_entity"
 CONF_BURNER_STATE_ENTITY: Final = "burner_state_entity"
+#: Which hydraulic circuit the burner-state sensor watches. The Rinnai
+#: integration exposes one burner sensor per circuit using the *same* value
+#: vocabulary ("Standby" / "Heating Water" / "Burning" / "Error"), so the raw
+#: string alone cannot say whether a burn is space heating or hot water - only
+#: knowing which circuit the sensor belongs to can.
+CONF_BURNER_CIRCUIT: Final = "burner_circuit"
 CONF_SUPPLY_TEMP_ENTITY: Final = "supply_temp_entity"
 CONF_RETURN_TEMP_ENTITY: Final = "return_temp_entity"
 CONF_ZONES: Final = "zones"
@@ -180,6 +186,82 @@ DECISION_REQUEST_HEAT: Final = "request_heat"
 DECISION_REVOKE_HEAT: Final = "revoke_heat"
 DECISION_SET_SUPPLY: Final = "set_supply_temperature"
 DECISION_DEGRADED: Final = "degraded"
+
+# ---------------------------------------------------------------------------
+# V0.2 - zone-combination analysis
+# ---------------------------------------------------------------------------
+#: How long one combination of simultaneously-demanding zones must persist
+#: before it is treated as a distinct observation rather than a transition.
+DEFAULT_COMBINATION_MIN_DWELL: Final = 120.0
+#: Combinations shorter than this are noise (a zone flickering) and are folded
+#: into the neighbouring observation instead of being counted separately.
+DEFAULT_COMBINATION_MIN_DURATION: Final = 60.0
+#: Retention for combination history, matching the burner window.
+DEFAULT_COMBINATION_WINDOW: Final = 24 * 3600.0
+#: A combination is "dominant" when it accounts for at least this share of
+#: heating time in the window.
+DEFAULT_COMBINATION_DOMINANT_SHARE: Final = 0.30
+#: Combustion quality grading thresholds (design doc 8 / V0.2).
+DEFAULT_CYCLING_GOOD_SECONDS: Final = 600.0
+DEFAULT_CYCLING_POOR_SECONDS: Final = 300.0
+
+#: Sentinel for "no zone was demanding heat" in combination keys and reports.
+COMBINATION_NONE: Final = "none"
+
+#: Combustion event quality grades.
+QUALITY_GOOD: Final = "good"
+QUALITY_FAIR: Final = "fair"
+QUALITY_POOR: Final = "poor"
+QUALITY_UNKNOWN: Final = "unknown"
+
+#: Hydraulic circuits a burner-state sensor can watch (see CONF_BURNER_CIRCUIT).
+CIRCUIT_HEATING: Final = "heating"
+CIRCUIT_DHW: Final = "dhw"
+
+CIRCUITS: Final = [CIRCUIT_HEATING, CIRCUIT_DHW]
+
+#: Why a burn happened (V0.2 correlation).
+BURN_CAUSE_DEMAND: Final = "demand"
+BURN_CAUSE_DHW: Final = "dhw"
+BURN_CAUSE_UNEXPLAINED: Final = "unexplained"
+BURN_CAUSE_UNKNOWN: Final = "unknown"
+
+# ---------------------------------------------------------------------------
+# V0.2 - comfort diagnostics (over/under temperature)
+# ---------------------------------------------------------------------------
+#: A room is "overheating" when the measured temperature exceeds the effective
+#: target by at least this much for at least the dwell time below.
+DEFAULT_OVERHEAT_DELTA: Final = 1.0
+DEFAULT_OVERHEAT_DWELL: Final = 1800.0
+#: A room is "underheating" when it stays this far *below* target while the
+#: zone is genuinely demanding heat - that is a capacity or hydraulics symptom,
+#: not a setpoint mistake.
+DEFAULT_UNDERHEAT_DELTA: Final = 1.5
+DEFAULT_UNDERHEAT_DWELL: Final = 3600.0
+#: Retention for comfort samples.
+DEFAULT_COMFORT_WINDOW: Final = 24 * 3600.0
+#: Minimum spacing between recorded comfort samples, to bound memory.
+DEFAULT_COMFORT_SAMPLE_INTERVAL: Final = 300.0
+
+#: Comfort verdicts.
+COMFORT_OK: Final = "ok"
+COMFORT_OVERHEATING: Final = "overheating"
+COMFORT_UNDERHEATING: Final = "underheating"
+COMFORT_UNKNOWN: Final = "unknown"
+
+#: Actionable advice codes emitted by the comfort analyser.
+ADVICE_LOWER_SUPPLY: Final = "lower_supply_temperature"
+ADVICE_RAISE_SUPPLY: Final = "raise_supply_temperature"
+ADVICE_CHECK_HYDRAULICS: Final = "check_hydraulics_or_balancing"
+ADVICE_CHECK_SCHEDULE: Final = "check_schedule_or_override"
+ADVICE_NONE: Final = "none"
+
+#: Reason code for "the room sits below its target but nothing is calling for
+#: heat". This is deliberately NOT a comfort fault: the control loop has no
+#: setpoint it could change to fix it, so the verdict stays OK while the advice
+#: points at the hardware. The deviation is still reported, so the room is never
+#: presented as warm.
+REASON_BELOW_TARGET_WITHOUT_DEMAND: Final = "below_target_without_demand"
 
 # ---------------------------------------------------------------------------
 # HVAC actions / modes as reported by climate entities

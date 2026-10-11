@@ -20,12 +20,15 @@ boiler with a burner-state sensor.
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import yaml
+from homeassistant.util import slugify
 
 from custom_components.climatepilot import (
     PLATFORMS,
@@ -40,10 +43,19 @@ from custom_components.climatepilot.binary_sensor import (
     DegradedBinarySensor,
     HeatRequestBinarySensor,
     ManualOverrideBinarySensor,
+    OverheatingBinarySensor,
     ShortCycleAlertBinarySensor,
+    UnderheatingBinarySensor,
 )
 from custom_components.climatepilot.button import ReassessButton, ResumeAutoButton
 from custom_components.climatepilot.const import (
+    ADVICE_LOWER_SUPPLY,
+    ADVICE_NONE,
+    ADVICE_RAISE_SUPPLY,
+    COMFORT_OK,
+    COMFORT_OVERHEATING,
+    COMFORT_UNDERHEATING,
+    COMFORT_UNKNOWN,
     CONF_ZONE_ID,
     CONTROL_MODE_COORDINATE,
     CONTROL_MODE_OBSERVE,
@@ -55,6 +67,10 @@ from custom_components.climatepilot.const import (
     FSM_IDLE,
     HVAC_ACTION_HEATING,
     HVAC_ACTION_IDLE,
+    QUALITY_FAIR,
+    QUALITY_GOOD,
+    QUALITY_POOR,
+    QUALITY_UNKNOWN,
     SERVICE_REASSESS,
     SERVICE_RESUME_AUTO,
     SERVICE_SET_SUPPLY_TEMPERATURE,
@@ -73,6 +89,11 @@ from custom_components.climatepilot.select import ControlModeSelect, ZoneModeSel
 from custom_components.climatepilot.sensor import (
     ActiveZonesSensor,
     BurnerStarts24hSensor,
+    Combinations24hSensor,
+    ComfortAdviceSensor,
+    ComfortVerdictSensor,
+    CyclingQualitySensor,
+    DominantZoneCombinationSensor,
     EffectiveSetpointSensor,
     HeatingStateSensor,
     LastBurnDurationSensor,
@@ -81,14 +102,22 @@ from custom_components.climatepilot.sensor import (
     SetpointSourceSensor,
     SuggestedSupplyTempSensor,
     SupplyTemperatureSensor,
+    UnexplainedBurns24hSensor,
+    ZoneCombinationCountSensor,
     ZoneTemperatureSensor,
 )
 from custom_components.climatepilot.switch import AuxiliaryLoadSwitch
 
 COMPONENT_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "climatepilot"
+DASHBOARD_FILE = Path(__file__).resolve().parents[1] / "dashboards" / "climatepilot.yaml"
 
 ENTRY_ID = "entry_abc123"
 T0 = datetime(2026, 2, 3, 12, 0, tzinfo=UTC)
+
+#: Distinguishes "caller did not pass this" from "caller passed ``None``".
+#: Several V0.2 surfaces treat ``None`` as a real state ("no report yet"), so a
+#: default of ``None`` would make the meaningful case unrepresentable.
+UNSET: object = object()
 
 ZONES = {
     "living_room": ("climate.livingroom_floorheating", "客厅"),
@@ -145,9 +174,121 @@ def make_burner_snapshot(**overrides: object) -> dict[str, object]:
         "last_started_at": None,
         "last_ended_at": None,
         "demand_active": True,
+        # V0.2 combustion grading (INTERFACES_V0.2.md 3.3).
+        "cycling_quality": QUALITY_GOOD,
+        "cycling_quality_reason": "average 720s over 9 heating burns",
+        "unexplained_burns_24h": 1,
+        "burns_without_demand_24h": 1,
+        "grade_heating_24h": {"good": 7, "fair": 2},
+        "grade_dhw_24h": {"poor": 1},
     }
     snapshot.update(overrides)
     return snapshot
+
+
+class FakeCombinationReport:
+    """Stand-in for ``CombinationReport`` (INTERFACES_V0.2.md 3.1).
+
+    ``dominant_threshold``, ``has_dominant_mode`` and ``total_groups`` belong to
+    the engine's ``as_dict()`` export rather than to the report's attribute
+    surface, so the double carries them exactly that way - a sensor that starts
+    reading them as attributes fails here instead of in production.
+    """
+
+    def __init__(
+        self,
+        *,
+        dominant_key: str = "living_room+master_bedroom",
+        dominant_share: float = 0.62,
+        distinct_count: int = 2,
+        total_demand_seconds: float = 5400.0,
+        stats: tuple[tuple[str, float], ...] = (
+            ("living_room+master_bedroom", 3600.0),
+            ("living_room", 1800.0),
+            ("none", 0.0),
+        ),
+        current_key: str = "living_room+master_bedroom",
+        current_seconds: float = 900.0,
+        dominant_threshold: float = 0.3,
+    ) -> None:
+        self.dominant_key = dominant_key
+        self.dominant_share = dominant_share
+        self.distinct_count = distinct_count
+        self.total_demand_seconds = total_demand_seconds
+        self.stats = tuple(
+            SimpleNamespace(key=key, total_seconds=seconds) for key, seconds in stats
+        )
+        self.current_key = current_key
+        self.current_seconds = current_seconds
+        self.dominant_threshold = dominant_threshold
+
+    @property
+    def has_dominant_mode(self) -> bool:
+        return self.dominant_share >= self.dominant_threshold
+
+    @property
+    def total_groups(self) -> int:
+        return len(self.stats)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "dominant_key": self.dominant_key,
+            "dominant_share": round(self.dominant_share, 4),
+            "dominant_threshold": round(self.dominant_threshold, 4),
+            "has_dominant_mode": self.has_dominant_mode,
+            "distinct_count": self.distinct_count,
+            "total_groups": self.total_groups,
+            "total_demand_seconds": round(self.total_demand_seconds, 1),
+            "current_key": self.current_key,
+            "current_seconds": round(self.current_seconds, 1),
+            "stats": [
+                {"key": stat.key, "total_seconds": round(stat.total_seconds, 1)}
+                for stat in self.stats
+            ],
+        }
+
+
+class FakeComfortVerdict:
+    """Stand-in for ``ComfortVerdict`` (INTERFACES_V0.2.md 3.2)."""
+
+    def __init__(
+        self,
+        zone_id: str,
+        *,
+        verdict: str = COMFORT_OK,
+        advice: str = ADVICE_NONE,
+        average_deviation: float = 0.2,
+        max_over: float = 0.6,
+        max_under: float = 0.4,
+        overheated_seconds: float = 0.0,
+        underheated_seconds: float = 0.0,
+        samples: int = 12,
+        reason_codes: tuple[str, ...] = ("comfort_window_ok",),
+    ) -> None:
+        self.zone_id = zone_id
+        self.verdict = verdict
+        self.advice = advice
+        self.average_deviation = average_deviation
+        self.max_over = max_over
+        self.max_under = max_under
+        self.overheated_seconds = overheated_seconds
+        self.underheated_seconds = underheated_seconds
+        self.samples = samples
+        self.reason_codes = reason_codes
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "zone_id": self.zone_id,
+            "verdict": self.verdict,
+            "advice": self.advice,
+            "average_deviation": round(self.average_deviation, 2),
+            "max_over": self.max_over,
+            "max_under": self.max_under,
+            "overheated_seconds": self.overheated_seconds,
+            "underheated_seconds": self.underheated_seconds,
+            "samples": self.samples,
+            "reason_codes": list(self.reason_codes),
+        }
 
 
 class FakeWeather:
@@ -176,6 +317,8 @@ class FakeCoordinator:
         burner: dict[str, object] | None = None,
         control_mode: str = CONTROL_MODE_COORDINATE,
         capabilities: object | None = None,
+        combinations: object = UNSET,
+        comfort: dict[str, object] | None = None,
     ) -> None:
         self.system_id = ENTRY_ID
         self.name = "智暖领航"
@@ -234,6 +377,19 @@ class FakeCoordinator:
         self.weather = FakeWeather()
         self.last_update_success = True
 
+        # --- V0.2 surfaces (INTERFACES_V0.2.md 3.4) -----------------------
+        # ``combinations=None`` is a meaningful state (no report yet), so the
+        # sentinel rather than None decides whether the caller overrode it.
+        self.combinations = FakeCombinationReport() if combinations is UNSET else combinations
+        self.comfort: dict[str, object] = (
+            comfort
+            if comfort is not None
+            else {zone_id: FakeComfortVerdict(zone_id) for zone_id in self.zones}
+        )
+        # The analyser is what tells a comfort flag how long a fault must last;
+        # a double without it proves the flag degrades instead of guessing.
+        self.comfort_analyser = SimpleNamespace(overheat_dwell=1800.0, underheat_dwell=3600.0)
+
         # Commands the platform layer is allowed to call.
         self.async_set_control_mode = AsyncMock()
         self.async_resume_auto = AsyncMock()
@@ -246,6 +402,24 @@ class FakeCoordinator:
     @property
     def zone_ids(self) -> list[str]:
         return list(self.zones)
+
+    @property
+    def cycling_quality(self) -> str:
+        burner = self.diagnostics_snapshot.get("burner") or {}
+        return str(burner.get("cycling_quality", QUALITY_UNKNOWN))
+
+    @property
+    def cycling_quality_reason(self) -> str:
+        burner = self.diagnostics_snapshot.get("burner") or {}
+        return str(burner.get("cycling_quality_reason", ""))
+
+    @property
+    def unexplained_burns(self) -> int:
+        burner = self.diagnostics_snapshot.get("burner") or {}
+        return int(burner.get("unexplained_burns_24h", 0))
+
+    def comfort_for(self, zone_id: str) -> object | None:
+        return self.comfort.get(zone_id)
 
     @property
     def short_cycle_alert(self) -> bool:
@@ -303,6 +477,34 @@ def assert_translation_key(platform: str, key: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: (system-level, per-zone) entity inventory as declared by ``docs/INTERFACES.md``
+#: 2.9 and ``docs/INTERFACES_V0.2.md`` 2 / 3.5, and consumed from the ``entity``
+#: section of ``strings.json``. Kept at module level so the build helper and the
+#: count test cannot disagree with each other.
+#:
+#: ``climate`` is absent on purpose: this module builds the platform entities the
+#: way each platform's ``async_setup_entry`` does, and the whole-home thermostat
+#: is created by ``climate.py`` through a different path (``test_integration_setup``
+#: counts it).
+EXPECTED_PER_PLATFORM: dict[str, tuple[int, int]] = {
+    "sensor": (12, 6),
+    "binary_sensor": (2, 4),
+    "select": (1, 1),
+    "button": (1, 1),
+    "number": (1, 0),
+    "switch": (0, 1),
+}
+
+#: Entities one three-zone system must expose in total. Derived, never pinned:
+#: V0.1 asserted a bare ``39`` *and* restated the same sum in a trailing comment,
+#: so the comment and the number could drift apart with nothing to catch it. The
+#: two axes (system-level, per-zone) now live in ``EXPECTED_PER_PLATFORM`` and
+#: every total below is read out of them.
+EXPECTED_TOTAL = sum(
+    system + len(ZONES) * per_zone for system, per_zone in EXPECTED_PER_PLATFORM.values()
+)
+
+
 def build_platform_entities(coordinator: FakeCoordinator) -> dict[str, list]:
     """Build every entity exactly the way each platform's setup does."""
     entities: dict[str, list] = {
@@ -314,6 +516,11 @@ def build_platform_entities(coordinator: FakeCoordinator) -> dict[str, list]:
             SupplyTemperatureSensor(coordinator),
             BurnerStarts24hSensor(coordinator),
             LastBurnDurationSensor(coordinator),
+            DominantZoneCombinationSensor(coordinator),
+            ZoneCombinationCountSensor(coordinator),
+            Combinations24hSensor(coordinator),
+            CyclingQualitySensor(coordinator),
+            UnexplainedBurns24hSensor(coordinator),
         ],
         "binary_sensor": [
             ShortCycleAlertBinarySensor(coordinator),
@@ -331,12 +538,16 @@ def build_platform_entities(coordinator: FakeCoordinator) -> dict[str, list]:
                 SetpointSourceSensor(coordinator, zone_id),
                 ZoneTemperatureSensor(coordinator, zone_id),
                 OverrideRemainingSensor(coordinator, zone_id),
+                ComfortVerdictSensor(coordinator, zone_id),
+                ComfortAdviceSensor(coordinator, zone_id),
             ]
         )
         entities["binary_sensor"].extend(
             [
                 ManualOverrideBinarySensor(coordinator, zone_id),
                 HeatRequestBinarySensor(coordinator, zone_id),
+                OverheatingBinarySensor(coordinator, zone_id),
+                UnderheatingBinarySensor(coordinator, zone_id),
             ]
         )
         entities["select"].append(ZoneModeSelect(coordinator, zone_id))
@@ -362,29 +573,58 @@ def test_entity_counts() -> None:
     entities = build_platform_entities(coordinator)
     zone_count = len(coordinator.zone_ids)
 
-    # (system-level, per-zone) as declared by documents/INTERFACES.md 2.9 and
-    # consumed from strings.json entity section.
-    expected_per_platform = {
-        "sensor": (7, 4),
-        "binary_sensor": (2, 2),
-        "select": (1, 1),
-        "button": (1, 1),
-        "number": (1, 0),
-        "switch": (0, 1),
-    }
-    assert set(entities) == set(expected_per_platform)
+    assert set(entities) == set(EXPECTED_PER_PLATFORM)
 
-    for platform, (system_level, per_zone) in expected_per_platform.items():
+    for platform, (system_level, per_zone) in EXPECTED_PER_PLATFORM.items():
         assert len(entities[platform]) == system_level + zone_count * per_zone, (
             f"{platform}: expected {system_level} + {zone_count}*{per_zone}"
         )
 
     total = sum(len(group) for group in entities.values())
-    assert total == 39  # 12 system-level + 3 zones * 9 per-zone entities
-    assert total == (
-        sum(system for system, _ in expected_per_platform.values())
-        + zone_count * sum(per_zone for _, per_zone in expected_per_platform.values())
+    assert total == EXPECTED_TOTAL, (
+        f"expected {EXPECTED_TOTAL} entities (V0.1's 31 + 5 system-level + "
+        f"4 per zone x {zone_count}), got {total}"
     )
+    assert total == (
+        sum(system for system, _ in EXPECTED_PER_PLATFORM.values())
+        + zone_count * sum(per_zone for _, per_zone in EXPECTED_PER_PLATFORM.values())
+    )
+
+
+def test_expected_counts_agree_with_strings_json() -> None:
+    """The declared inventory must match the translated keys exactly.
+
+    This is the check V0.1 was missing. That suite pinned the platform split in
+    one place and a bare total in another, with nothing tying either to the
+    ``strings.json`` tree they both describe - so the two could drift, and a
+    ``translation_key`` added without touching the counts would only have shown
+    up as a blank entity name in the UI.
+
+    ``climate`` is excluded from both sides for the reason given above
+    ``EXPECTED_PER_PLATFORM``: it is not built by the platform setup path.
+
+    The comparison is against *keys*, not entities: ``strings.json`` holds one
+    entry per ``translation_key``, so a per-zone key contributes once no matter
+    how many rooms exist. Both axes of ``EXPECTED_PER_PLATFORM`` therefore
+    contribute once each.
+    """
+    declared = {
+        platform: system_level + per_zone
+        for platform, (system_level, per_zone) in EXPECTED_PER_PLATFORM.items()
+    }
+    documented = {
+        platform: len(keys)
+        for platform, keys in ENTITY_STRINGS.items()
+        if platform in EXPECTED_PER_PLATFORM
+    }
+    assert declared == documented, f"counts drift from strings.json: {declared} vs {documented}"
+
+    # ... and the entity total really is what the two axes multiply out to.
+    total = sum(
+        system_level + len(ZONES) * per_zone
+        for system_level, per_zone in EXPECTED_PER_PLATFORM.values()
+    )
+    assert total == EXPECTED_TOTAL
 
 
 def test_all_translation_keys_exist_in_strings() -> None:
@@ -433,20 +673,280 @@ def test_expected_translation_key_set() -> None:
         "supply_temperature",
         "burner_starts_24h",
         "last_burn_duration",
+        "dominant_zone_combination",
+        "zone_combination_count",
+        "combinations_24h",
+        "cycling_quality",
+        "unexplained_burns_24h",
         "effective_setpoint",
         "setpoint_source",
         "zone_temperature",
         "override_remaining",
+        "comfort_verdict",
+        "comfort_advice",
     }
     assert keys["binary_sensor"] == {
         "manual_override",
         "short_cycle_alert",
         "degraded",
         "heat_request",
+        "overheating",
+        "underheating",
     }
     assert keys["button"] == {"resume_auto", "reassess"}
     assert keys["number"] == {"supply_temperature_override"}
     assert keys["switch"] == {"auxiliary_load"}
+
+
+def test_v02_translation_keys_are_implemented_verbatim() -> None:
+    """The V0.2 keys are a frozen contract (INTERFACES_V0.2.md section 2).
+
+    The dashboard YAML, the translations and this test all quote the same nine
+    literals; a rename in one place is silent everywhere else, so they are
+    pinned here by hand rather than derived from the entities under test.
+    """
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entities = build_platform_entities(coordinator)
+
+    system_level = {
+        "dominant_zone_combination",
+        "zone_combination_count",
+        "combinations_24h",
+        "cycling_quality",
+        "unexplained_burns_24h",
+    }
+    per_zone_sensor = {"comfort_verdict", "comfort_advice"}
+    per_zone_binary = {"overheating", "underheating"}
+
+    sensor_keys = {entity.translation_key for entity in entities["sensor"]}
+    binary_keys = {entity.translation_key for entity in entities["binary_sensor"]}
+
+    assert system_level <= sensor_keys
+    assert per_zone_sensor <= sensor_keys
+    assert per_zone_binary <= binary_keys
+
+    # Each per-zone key must exist once per configured room, not once overall.
+    for key in per_zone_sensor:
+        assert sum(1 for entity in entities["sensor"] if entity.translation_key == key) == len(
+            coordinator.zone_ids
+        )
+    for key in per_zone_binary:
+        assert sum(
+            1 for entity in entities["binary_sensor"] if entity.translation_key == key
+        ) == len(coordinator.zone_ids)
+
+
+def test_v02_entity_categories_split_explanations_from_readings() -> None:
+    """Diagnostic only where the entity is troubleshooting evidence.
+
+    ``combinations_24h`` / ``cycling_quality`` / ``unexplained_burns_24h`` grade
+    the *boiler*; the dominant combination, the combination count and both
+    comfort entities describe the house and are meant to be on the dashboard,
+    where an entity category would hide them behind the diagnostic filter.
+    """
+    from homeassistant.helpers.entity import EntityCategory
+
+    diagnostic = {"combinations_24h", "cycling_quality", "unexplained_burns_24h"}
+    user_facing = {
+        "dominant_zone_combination",
+        "zone_combination_count",
+        "comfort_verdict",
+        "comfort_advice",
+    }
+    flags = {"overheating", "underheating"}
+
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entities = build_platform_entities(coordinator)
+
+    for entity in [*entities["sensor"], *entities["binary_sensor"]]:
+        key = entity.translation_key
+        if key in diagnostic:
+            assert entity.entity_category is EntityCategory.DIAGNOSTIC, key
+        elif key in user_facing | flags:
+            assert entity.entity_category is None, key
+
+
+# ---------------------------------------------------------------------------
+# Dashboard contract
+# ---------------------------------------------------------------------------
+
+#: Device names the shipped dashboard was written for. They are the reference
+#: installation's: the system name from ``tests/test_integration_setup.py`` and
+#: its two rooms. An entity id is ``<slug of device name>_<slug of ENGLISH
+#: entity name>`` - see ``docs/DASHBOARD.md`` section 1.
+DASHBOARD_SYSTEM_DEVICE = "我的家"
+DASHBOARD_ZONE_DEVICES = {"living_room": "客厅地暖", "master_bedroom": "主卧地暖"}
+
+#: The two KNX thermostats are the *user's* entities, created by their KNX
+#: integration - not by ClimatePilot - so they are not derivable from
+#: ``strings.json`` and are listed explicitly.
+USER_OWNED_ENTITIES = {
+    "climate.livingroom_floorheating",
+    "climate.master_bedroom_floorheating",
+}
+
+#: translation_keys that belong to a zone rather than to the system device.
+ZONE_SCOPED_KEYS = {
+    ("sensor", "effective_setpoint"),
+    ("sensor", "setpoint_source"),
+    ("sensor", "zone_temperature"),
+    ("sensor", "override_remaining"),
+    ("sensor", "comfort_verdict"),
+    ("sensor", "comfort_advice"),
+    ("binary_sensor", "manual_override"),
+    ("binary_sensor", "heat_request"),
+    ("binary_sensor", "overheating"),
+    ("binary_sensor", "underheating"),
+    ("select", "zone_mode"),
+    ("button", "resume_auto"),
+    ("switch", "auxiliary_load"),
+}
+
+
+def load_english_entity_names() -> dict[str, dict[str, str]]:
+    """English display names per platform/key, from ``translations/en.json``."""
+    with (COMPONENT_DIR / "translations" / "en.json").open(encoding="utf-8") as handle:
+        entity = json.load(handle)["entity"]
+    return {
+        platform: {key: meta["name"] for key, meta in keys.items()}
+        for platform, keys in entity.items()
+    }
+
+
+def _yaml_strings(node: object):
+    """Yield every string value in a parsed YAML document, keys excluded."""
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from _yaml_strings(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _yaml_strings(value)
+    elif isinstance(node, str):
+        yield node
+
+
+#: Matches an entity id anywhere inside a card value (``entity: x``,
+#: ``features[].entity``, a template string, ...).
+_ENTITY_ID = re.compile(
+    r"\b(?:sensor|binary_sensor|select|button|number|switch|climate)\.[a-z0-9_]+"
+)
+
+
+def dashboard_entity_ids() -> set[str]:
+    """Every entity id the shipped dashboard actually references.
+
+    Parsed as YAML rather than scanned as text: a commented-out card or an id
+    quoted in prose would otherwise be counted as a live reference, and the
+    completeness check below would then pass while the panel was missing a card.
+    Comments never survive parsing, so this cannot be fooled by them.
+    """
+    document = yaml.safe_load(DASHBOARD_FILE.read_text(encoding="utf-8"))
+    ids: set[str] = set()
+    for text in _yaml_strings(document):
+        ids.update(_ENTITY_ID.findall(text))
+    return ids
+
+
+def expected_dashboard_ids() -> set[str]:
+    """Derive the ids the dashboard *should* use, by HA's real slug rule.
+
+    The subtlety that broke this once: Home Assistant builds an entity id from
+    the localised name only when the UI language is one of the 41 in
+    ``homeassistant.generated.languages.NATIVE_ENTITY_IDS``; **no Chinese variant
+    is in that list**, so a zh-Hans install shows Chinese names but ASCII English
+    ids. Deriving from ``en.json`` is therefore correct even for Chinese users,
+    and deriving from ``zh-Hans.json`` produces plausible-looking ids that do not
+    exist.
+
+    This helper is a *derivation*, so it can only ever be as right as its rule -
+    and it was wrong for exactly that reason: the first version of the dashboard
+    used ``slugify(<Chinese device name> + <Chinese entity name>)``, and the
+    check that "verified" it re-derived the same ids with the same wrong rule, so
+    it passed while every id was broken. Two sides of a check sharing one
+    assumption proves nothing about the assumption.
+
+    The independent check is
+    ``test_integration_setup.test_dashboard_entity_ids_exist_in_the_registry``,
+    which reads ids out of a booted Home Assistant instead of computing them. If
+    you change the rule here, that test is the one that must still agree.
+    """
+    names = load_english_entity_names()
+    expected: set[str] = set()
+    for platform, keys in names.items():
+        for key, name in keys.items():
+            slug = slugify(name)
+            if (platform, key) in ZONE_SCOPED_KEYS:
+                for device in DASHBOARD_ZONE_DEVICES.values():
+                    expected.add(f"{platform}.{slugify(device)}_{slug}")
+            else:
+                expected.add(f"{platform}.{slugify(DASHBOARD_SYSTEM_DEVICE)}_{slug}")
+    return expected
+
+
+def test_dashboard_references_only_real_entity_ids() -> None:
+    """Every id on the dashboard must be derivable from a translation_key.
+
+    A dashboard full of plausible-looking but non-existent ids is worse than no
+    dashboard: Home Assistant renders each one as an "entity not available" card
+    and the user has no way to tell a typo from a missing integration.
+    """
+    referenced = dashboard_entity_ids()
+    derivable = expected_dashboard_ids() | USER_OWNED_ENTITIES
+
+    unknown = sorted(referenced - derivable)
+    assert not unknown, (
+        "dashboard references ids that no translation_key produces (and that are "
+        f"not the user's own KNX entities): {unknown}"
+    )
+
+
+def test_dashboard_covers_every_translation_key() -> None:
+    """... and the other direction: no entity is missing from the panel.
+
+    Together with the test above this pins the dashboard exactly: one typo adds
+    an unresolvable id, one deletion removes a translation_key from the panel.
+    """
+    referenced = dashboard_entity_ids()
+    derivable = expected_dashboard_ids()
+
+    missing = sorted(derivable - referenced)
+    assert not missing, f"translation keys not shown on the dashboard: {missing}"
+
+
+def test_dashboard_does_not_use_chinese_derived_slugs() -> None:
+    """Guard the specific mistake this suite was fixed for.
+
+    Chinese names slugify into something that *looks* like an entity id, so a
+    wrong dashboard is self-consistent as long as the same assumption is used to
+    check it. Two independent signals catch it: no Chinese-derived slug may
+    appear, and the Chinese name must not equal the English one for these keys.
+    """
+    names_zh = {
+        platform: {key: meta["name"] for key, meta in keys.items()}
+        for platform, keys in json.loads(
+            (COMPONENT_DIR / "translations" / "zh-Hans.json").read_text(encoding="utf-8")
+        )["entity"].items()
+    }
+    names_en = load_english_entity_names()
+
+    chinese_derived: set[str] = set()
+    for platform, keys in names_zh.items():
+        for key, name in keys.items():
+            if name == names_en[platform][key]:
+                continue  # same in both languages: cannot distinguish
+            slug = slugify(name)
+            if (platform, key) in ZONE_SCOPED_KEYS:
+                for device in DASHBOARD_ZONE_DEVICES.values():
+                    chinese_derived.add(f"{platform}.{slugify(device)}_{slug}")
+            else:
+                chinese_derived.add(f"{platform}.{slugify(DASHBOARD_SYSTEM_DEVICE)}_{slug}")
+
+    offenders = sorted(dashboard_entity_ids() & chinese_derived)
+    assert not offenders, (
+        f"dashboard uses ids derived from Chinese names, which HA never creates: {offenders}"
+    )
+    # The guard is only meaningful if the two rules really do diverge.
+    assert chinese_derived, "no Chinese-derived ids were computed; the check is vacuous"
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +1268,318 @@ def test_degraded_binary_sensor_flags_unusable_weather() -> None:
 
 
 # ---------------------------------------------------------------------------
+# V0.2 system-level sensors: demand combinations
+# ---------------------------------------------------------------------------
+
+
+def test_dominant_zone_combination_publishes_the_engine_key() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = DominantZoneCombinationSensor(coordinator)
+    assert entity.native_value == "living_room+master_bedroom"
+
+    attributes = entity.extra_state_attributes
+    assert attributes["evaluated"] is True
+    assert attributes["dominant_share"] == 0.62
+    assert attributes["current_key"] == "living_room+master_bedroom"
+    assert attributes["distinct_count"] == 2
+
+
+def test_dominant_zone_combination_reports_none_demand_honestly() -> None:
+    """``none`` is a measurement ("nobody asked for heat"), not a missing value.
+
+    Conflating the two would make a summer afternoon look like a broken sensor.
+    """
+    report = FakeCombinationReport(
+        dominant_key="none",
+        dominant_share=0.0,
+        distinct_count=0,
+        total_demand_seconds=0.0,
+        stats=(("none", 7200.0),),
+        current_key="none",
+        current_seconds=7200.0,
+    )
+    coordinator = FakeCoordinator(compensation=FakeCompensation(), combinations=report)
+    assert DominantZoneCombinationSensor(coordinator).native_value == "none"
+
+
+def test_dominant_zone_combination_flags_a_diffuse_pattern() -> None:
+    """A leader below the threshold must not be presented as *the* pattern."""
+    report = FakeCombinationReport(dominant_share=0.2)
+    coordinator = FakeCoordinator(compensation=FakeCompensation(), combinations=report)
+    attributes = DominantZoneCombinationSensor(coordinator).extra_state_attributes
+    assert attributes["has_dominant_mode"] is False
+    assert attributes["dominant_threshold"] == 0.3
+
+
+def test_v02_system_sensors_are_unknown_before_the_first_cycle() -> None:
+    """No report yet is unknown, never zero (design doc 6.1)."""
+    coordinator = FakeCoordinator(compensation=FakeCompensation(), combinations=None)
+    for entity in (
+        DominantZoneCombinationSensor(coordinator),
+        ZoneCombinationCountSensor(coordinator),
+        Combinations24hSensor(coordinator),
+    ):
+        assert entity.native_value is None, type(entity).__name__
+        assert entity.extra_state_attributes == {"evaluated": False}
+
+
+def test_zone_combination_count_reads_distinct_count() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = ZoneCombinationCountSensor(coordinator)
+    assert entity.native_value == 2
+
+    attributes = entity.extra_state_attributes
+    assert attributes["dominant_key"] == "living_room+master_bedroom"
+    # Groups include the empty set; the count deliberately does not.
+    assert attributes["total_groups"] == 3
+    assert attributes["combinations"] == ["living_room+master_bedroom", "living_room", "none"]
+
+
+def test_combinations_24h_publishes_demand_seconds_not_the_count() -> None:
+    """The state is demand time; ``zone_combination_count`` already has the count.
+
+    Two entities publishing one number would be dashboard noise, so the second
+    one carries the quantity that graphs and can back a statistic instead.
+    """
+    from homeassistant.const import UnitOfTime
+
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = Combinations24hSensor(coordinator)
+    assert entity.native_value == 5400.0
+    assert entity.native_unit_of_measurement == UnitOfTime.SECONDS
+
+    attributes = entity.extra_state_attributes
+    # The engine's own export travels verbatim, so entity and diagnostics agree.
+    assert attributes["total_demand_seconds"] == 5400.0
+    assert attributes["dominant_key"] == "living_room+master_bedroom"
+    # ... and the minutes copy saves the user the division.
+    assert attributes["total_demand_minutes"] == 90.0
+
+
+# ---------------------------------------------------------------------------
+# V0.2 system-level sensors: combustion quality
+# ---------------------------------------------------------------------------
+
+
+def test_cycling_quality_sensor_maps_quality_constants() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = CyclingQualitySensor(coordinator)
+    assert entity.native_value == QUALITY_GOOD
+    assert entity.options == [QUALITY_GOOD, QUALITY_FAIR, QUALITY_POOR, QUALITY_UNKNOWN]
+
+    attributes = entity.extra_state_attributes
+    assert attributes["reason"] == "average 720s over 9 heating burns"
+    assert attributes["grade_heating_24h"] == {"good": 7, "fair": 2}
+    # DHW is graded separately precisely so it cannot drag the heating grade.
+    assert attributes["grade_dhw_24h"] == {"poor": 1}
+
+
+def test_cycling_quality_sensor_refuses_an_untranslatable_value() -> None:
+    """A state the enum translation cannot render must not be published."""
+    coordinator = FakeCoordinator(
+        compensation=FakeCompensation(),
+        burner=make_burner_snapshot(cycling_quality="excellent"),
+    )
+    assert CyclingQualitySensor(coordinator).native_value is None
+
+
+def test_cycling_quality_unknown_without_a_burner_reading() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    coordinator.diagnostics_snapshot = {}
+    entity = CyclingQualitySensor(coordinator)
+    assert entity.native_value == QUALITY_UNKNOWN
+
+
+def test_unexplained_burns_sensor_reads_the_diagnostic_count() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = UnexplainedBurns24hSensor(coordinator)
+    assert entity.native_value == 1
+
+    attributes = entity.extra_state_attributes
+    assert attributes["demand_active"] is True
+    # The V0.1 spelling of the same measurement stays available.
+    assert attributes["burns_without_demand_24h"] == 1
+    assert attributes["cycling_quality"] == QUALITY_GOOD
+
+
+def test_unexplained_burns_are_unknown_when_the_burner_is_blind() -> None:
+    """Zero unexplained burns and 'we cannot see the burner' must differ."""
+    coordinator = FakeCoordinator(
+        compensation=FakeCompensation(),
+        burner=make_burner_snapshot(quality="uncertain"),
+    )
+    entity = UnexplainedBurns24hSensor(coordinator)
+    assert entity.native_value is None
+    assert entity.extra_state_attributes["quality"] == "uncertain"
+
+
+# ---------------------------------------------------------------------------
+# V0.2 zone-level comfort sensors
+# ---------------------------------------------------------------------------
+
+
+def test_comfort_verdict_sensor_maps_verdict_constants() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = ComfortVerdictSensor(coordinator, "living_room")
+    assert entity.native_value == COMFORT_OK
+    assert entity.options == [
+        COMFORT_OK,
+        COMFORT_OVERHEATING,
+        COMFORT_UNDERHEATING,
+        COMFORT_UNKNOWN,
+    ]
+
+    coordinator.comfort["living_room"] = FakeComfortVerdict(
+        "living_room",
+        verdict=COMFORT_OVERHEATING,
+        advice=ADVICE_LOWER_SUPPLY,
+        average_deviation=1.4,
+        overheated_seconds=2400.0,
+        reason_codes=("overheat_dwell_exceeded",),
+    )
+    assert entity.native_value == COMFORT_OVERHEATING
+    attributes = entity.extra_state_attributes
+    assert attributes["average_deviation"] == 1.4
+    assert attributes["overheated_seconds"] == 2400.0
+    assert attributes["reason_codes"] == ["overheat_dwell_exceeded"]
+
+
+def test_comfort_verdict_is_unknown_without_samples() -> None:
+    """An unsampled room is unmeasured, not 'ok' and not unavailable.
+
+    The entity is available and reports ``unknown`` because the integration is
+    working fine -- it simply has nothing to say about this room yet.
+    """
+    coordinator = FakeCoordinator(compensation=FakeCompensation(), comfort={})
+    entity = ComfortVerdictSensor(coordinator, "living_room")
+    assert entity.native_value == COMFORT_UNKNOWN
+    assert entity.extra_state_attributes["evaluated"] is False
+
+
+def test_comfort_advice_sensor_maps_advice_constants() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = ComfortAdviceSensor(coordinator, "master_bedroom")
+    assert entity.native_value == ADVICE_NONE
+
+    coordinator.comfort["master_bedroom"] = FakeComfortVerdict(
+        "master_bedroom",
+        verdict=COMFORT_UNDERHEATING,
+        advice=ADVICE_RAISE_SUPPLY,
+        average_deviation=-1.8,
+        reason_codes=("underheat_dwell_exceeded",),
+    )
+    assert entity.native_value == ADVICE_RAISE_SUPPLY
+    assert entity.extra_state_attributes["verdict"] == COMFORT_UNDERHEATING
+    assert entity.extra_state_attributes["average_deviation"] == -1.8
+
+
+def test_comfort_advice_is_none_without_samples() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation(), comfort={})
+    entity = ComfortAdviceSensor(coordinator, "living_room")
+    assert entity.native_value == ADVICE_NONE
+    assert entity.extra_state_attributes["evaluated"] is False
+
+
+def test_comfort_sensors_tolerate_an_unknown_verdict_string() -> None:
+    """The engine is the source of truth; a stray code must not crash the UI."""
+    coordinator = FakeCoordinator(
+        compensation=FakeCompensation(),
+        comfort={
+            "living_room": FakeComfortVerdict(
+                "living_room", verdict="boiling", advice="turn_it_off"
+            )
+        },
+    )
+    assert ComfortVerdictSensor(coordinator, "living_room").native_value == COMFORT_UNKNOWN
+    assert ComfortAdviceSensor(coordinator, "living_room").native_value == ADVICE_NONE
+
+
+# ---------------------------------------------------------------------------
+# V0.2 zone-level comfort flags
+# ---------------------------------------------------------------------------
+
+
+def test_overheating_flag_reads_the_engine_verdict() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = OverheatingBinarySensor(coordinator, "living_room")
+    assert entity.is_on is False
+    assert entity.available is True
+    assert entity.extra_state_attributes["dwell_seconds"] == 1800.0
+
+    coordinator.comfort["living_room"] = FakeComfortVerdict(
+        "living_room", verdict=COMFORT_OVERHEATING, advice=ADVICE_LOWER_SUPPLY
+    )
+    assert entity.is_on is True
+    assert entity.extra_state_attributes["verdict"] == COMFORT_OVERHEATING
+
+
+def test_underheating_flag_reads_the_engine_verdict() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    entity = UnderheatingBinarySensor(coordinator, "living_room")
+    assert entity.is_on is False
+    assert entity.extra_state_attributes["dwell_seconds"] == 3600.0
+
+    coordinator.comfort["living_room"] = FakeComfortVerdict(
+        "living_room", verdict=COMFORT_UNDERHEATING, advice=ADVICE_RAISE_SUPPLY
+    )
+    assert entity.is_on is True
+
+
+def test_comfort_flags_are_unavailable_when_the_verdict_is_unknown() -> None:
+    """Otherwise the flag would read as 'checked, and fine' while nothing was checked."""
+    coordinator = FakeCoordinator(
+        compensation=FakeCompensation(),
+        comfort={
+            "living_room": FakeComfortVerdict(
+                "living_room", verdict=COMFORT_UNKNOWN, advice=ADVICE_NONE
+            )
+        },
+    )
+    entity = OverheatingBinarySensor(coordinator, "living_room")
+    assert entity.available is False
+    assert entity.is_on is None
+    assert UnderheatingBinarySensor(coordinator, "living_room").is_on is None
+
+
+def test_comfort_flags_are_unavailable_without_a_sample() -> None:
+    coordinator = FakeCoordinator(compensation=FakeCompensation(), comfort={})
+    entity = OverheatingBinarySensor(coordinator, "living_room")
+    assert entity.available is False
+    assert entity.is_on is None
+    assert entity.extra_state_attributes["evaluated"] is False
+
+
+def test_comfort_flags_are_mutually_exclusive() -> None:
+    """One verdict drives both flags, so both can never be on at once."""
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    over = OverheatingBinarySensor(coordinator, "living_room")
+    under = UnderheatingBinarySensor(coordinator, "living_room")
+
+    for verdict in (COMFORT_OK, COMFORT_OVERHEATING, COMFORT_UNDERHEATING, COMFORT_UNKNOWN):
+        coordinator.comfort["living_room"] = FakeComfortVerdict("living_room", verdict=verdict)
+        assert not (over.is_on and under.is_on), verdict
+
+
+def test_comfort_flags_degrade_when_the_analyser_is_absent() -> None:
+    """A missing dwell setting is reported as unknown, never as a made-up number."""
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    del coordinator.comfort_analyser
+    entity = OverheatingBinarySensor(coordinator, "living_room")
+    assert entity.extra_state_attributes["dwell_seconds"] is None
+
+
+def test_comfort_flags_are_available_without_ha() -> None:
+    """Availability must not depend on an entity being attached to a platform."""
+    coordinator = FakeCoordinator(compensation=FakeCompensation())
+    coordinator.last_update_success = False
+    entity = OverheatingBinarySensor(coordinator, "living_room")
+    assert entity.available is False
+    # ``is_on`` must stay answerable even then: HA writes the state once more as
+    # it tears the entity down, and a raise there becomes a logged error.
+    assert entity.is_on is False
+
+
+# ---------------------------------------------------------------------------
 # Selects
 # ---------------------------------------------------------------------------
 
@@ -941,12 +1753,20 @@ async def test_platform_setup_adds_expected_entities_per_platform() -> None:
     from custom_components.climatepilot import switch as switch_platform
 
     expectations = [
-        (sensor_platform, 7 + 4 * 3),
-        (bs_platform, 2 + 2 * 3),
-        (select_platform, 1 + 3),
-        (button_platform, 1 + 3),
-        (number_platform, 1),
-        (switch_platform, 3),
+        (
+            sensor_platform,
+            EXPECTED_PER_PLATFORM["sensor"][0]
+            + EXPECTED_PER_PLATFORM["sensor"][1] * len(coordinator.zone_ids),
+        ),
+        (
+            bs_platform,
+            EXPECTED_PER_PLATFORM["binary_sensor"][0]
+            + EXPECTED_PER_PLATFORM["binary_sensor"][1] * len(coordinator.zone_ids),
+        ),
+        (select_platform, EXPECTED_PER_PLATFORM["select"][0] + len(coordinator.zone_ids)),
+        (button_platform, EXPECTED_PER_PLATFORM["button"][0] + len(coordinator.zone_ids)),
+        (number_platform, EXPECTED_PER_PLATFORM["number"][0]),
+        (switch_platform, len(coordinator.zone_ids)),
     ]
     for module, expected in expectations:
         added: list = []
@@ -968,7 +1788,7 @@ async def test_platform_setup_with_no_zones() -> None:
 
     added: list = []
     await sensor_platform.async_setup_entry(hass, entry, added.extend)
-    assert len(added) == 7
+    assert len(added) == EXPECTED_PER_PLATFORM["sensor"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -1306,6 +2126,15 @@ class TestCoordinatorDoubleMatchesReality:
         "weather",
         "short_cycle_alert",
         "degraded",
+        # V0.2 (docs/INTERFACES_V0.2.md 3.4). Adding them here is the point:
+        # renaming one on the coordinator must fail in this suite, not in a
+        # silently-unknown entity state on a real installation.
+        "combinations",
+        "comfort",
+        "comfort_analyser",
+        "cycling_quality",
+        "cycling_quality_reason",
+        "unexplained_burns",
     )
 
     #: Methods the platform layer calls on the coordinator.
@@ -1319,6 +2148,7 @@ class TestCoordinatorDoubleMatchesReality:
         "setpoint_source",
         "reason_codes_for",
         "supply_temperature_reading",
+        "comfort_for",
     )
 
     def test_real_coordinator_provides_the_whole_surface(self) -> None:

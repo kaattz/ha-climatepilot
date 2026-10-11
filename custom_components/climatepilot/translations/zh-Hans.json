@@ -281,6 +281,46 @@
       },
       "override_remaining": {
         "name": "手动覆盖剩余时间"
+      },
+      "dominant_zone_combination": {
+        "name": "主导需求组合"
+      },
+      "zone_combination_count": {
+        "name": "需求组合种类数（24 小时）"
+      },
+      "combinations_24h": {
+        "name": "需求组合明细（24 小时）"
+      },
+      "cycling_quality": {
+        "name": "燃烧质量等级",
+        "state": {
+          "good": "良好",
+          "fair": "一般",
+          "poor": "偏差",
+          "unknown": "未知"
+        }
+      },
+      "unexplained_burns_24h": {
+        "name": "无需求点火次数（24 小时）"
+      },
+      "comfort_verdict": {
+        "name": "舒适判定",
+        "state": {
+          "ok": "正常",
+          "overheating": "过热",
+          "underheating": "欠温",
+          "unknown": "未知"
+        }
+      },
+      "comfort_advice": {
+        "name": "舒适建议",
+        "state": {
+          "lower_supply_temperature": "下调供水温度",
+          "raise_supply_temperature": "提高供水温度",
+          "check_hydraulics_or_balancing": "检查水力平衡与阀门执行器",
+          "check_schedule_or_override": "检查日程或手动覆盖",
+          "none": "无需处理"
+        }
       }
     },
     "binary_sensor": {
@@ -295,6 +335,12 @@
       },
       "heat_request": {
         "name": "采暖请求"
+      },
+      "overheating": {
+        "name": "持续过热"
+      },
+      "underheating": {
+        "name": "持续欠温"
       }
     },
     "button": {
