@@ -1,0 +1,268 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ClimatePilot 采暖系统",
+        "description": "创建一套采暖系统。房间与策略可在创建后于“配置”中继续添加。",
+        "data": {
+          "system_name": "系统名称"
+        }
+      },
+      "boiler": {
+        "title": "热源",
+        "description": "选择锅炉/热泵的 climate 实体，以及用于诊断的燃烧状态与供回水温度传感器。",
+        "data": {
+          "boiler_entity": "热源 climate 实体",
+          "burner_state_entity": "燃烧器状态传感器（可选）",
+          "supply_temp_entity": "供水温度传感器（可选）",
+          "return_temp_entity": "回水温度传感器（可选）"
+        }
+      },
+      "verify": {
+        "title": "设备语义核验",
+        "description": "在写入锅炉前必须确认下列行为。当前有 {unverified_count} 项未确认；只要有一项未确认，集成将以“仅建议”方式运行，不会启停热源，也不会下发水温。请只在实机核实后勾选。",
+        "data": {
+          "verify_set_hvac_mode_heating_only": "已确认：关闭采暖模式不会影响生活热水与防冻保护",
+          "verify_set_temperature_is_supply": "已确认：设置温度对应采暖供水温度（非室温、非生活热水）",
+          "verify_min_flow_hydraulics": "已确认：最小循环流量与旁通/水力解耦已由安装方验收"
+        }
+      },
+      "outdoor": {
+        "title": "室外温度与天气补偿",
+        "description": "选择室外温度来源。无效或过期的读数不会按 0℃ 猜测，而是保持最后一次已确认的安全值；也可以留空，稍后再配置。",
+        "data": {
+          "outdoor_temperature_entity": "室外温度传感器（可选）",
+          "outdoor_stale_minutes": "读数过期判定（分钟）"
+        }
+      },
+      "weather_curve": {
+        "title": "天气补偿曲线",
+        "description": "两点定义的线性曲线，超出范围会被限幅。温州湿式地暖的初始建议：室外 0℃ → 45℃，15℃ → 40℃。",
+        "data": {
+          "outdoor_design": "设计室外温度",
+          "outdoor_stop": "曲线终点室外温度",
+          "supply_design": "设计点供水温度",
+          "supply_eco": "节能端供水温度",
+          "supply_min": "供水温度下限",
+          "supply_max": "供水温度上限"
+        }
+      },
+      "zones": {
+        "title": "采暖区域",
+        "description": "添加本系统下的 KNX 房间温控器。集成只读写这些 climate 实体，不直接驱动阀门。可以先留空，之后再于“配置”中添加。",
+        "data": {
+          "zones": "房间温控器"
+        }
+      },
+      "control_mode": {
+        "title": "控制模式",
+        "description": "建议先以“观察”运行数天，确认读数与需求判定符合预期后再切换到“协调”。",
+        "data": {
+          "control_mode": "控制模式"
+        }
+      }
+    },
+    "error": {
+      "boiler_not_found": "找不到该 climate 实体。",
+      "boiler_unavailable": "该 climate 实体当前不可用。",
+      "no_hvac_modes": "该实体没有报告任何 hvac_modes，无法确认可安全控制。",
+      "outdoor_not_found": "找不到该温度传感器实体。",
+      "zone_duplicate": "同一个温控器不能重复添加到两个区域。",
+      "zone_is_boiler": "热源实体不能同时作为房间温控器。",
+      "zone_not_found": "找不到该房间温控器实体。",
+      "invalid_curve": "曲线参数无效：要求 outdoor_stop > outdoor_design 且 supply_max > supply_min，且两个供水点都要落在上下限之间。",
+      "invalid_range": "允许下限必须小于允许上限。",
+      "unknown": "发生未知错误，请检查日志。"
+    },
+    "abort": {
+      "already_configured": "该系统已配置。",
+      "single_instance_allowed": "ClimatePilot 目前只允许一套采暖系统。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ClimatePilot 设置",
+        "menu_options": {
+          "zones": "房间与温控器",
+          "strategies": "温度策略与日程",
+          "heat_source": "热源与天气补偿",
+          "diagnostics": "诊断与恢复"
+        }
+      },
+      "zones": {
+        "title": "房间与温控器",
+        "description": "添加或移除房间。移除房间不会删除 KNX 设备，只会停止协调它；已有房间的策略与日程会保留。",
+        "data": {
+          "zones": "房间温控器"
+        }
+      },
+      "strategies": {
+        "title": "温度策略与日程",
+        "description": "选择要编辑的房间。",
+        "data": {
+          "zone_id": "房间"
+        }
+      },
+      "zone_menu": {
+        "title": "房间策略",
+        "menu_options": {
+          "zone_detail": "策略参数",
+          "schedule": "分时日程"
+        }
+      },
+      "zone_detail": {
+        "title": "房间策略参数",
+        "description": "基础目标由日程或固定模式决定；手动覆盖期间自动修正不生效。允许上下限会与温控器自身范围取交集。",
+        "data": {
+          "name": "名称",
+          "mode": "模式",
+          "min_temp": "允许下限",
+          "max_temp": "允许上限",
+          "target_step": "温控器步进",
+          "tolerance": "回读容差",
+          "override_policy": "手动覆盖恢复策略",
+          "override_minutes": "固定时长（分钟）",
+          "cold_adjustment": "允许寒潮室温修正",
+          "aux_load": "允许作为辅助热负载"
+        }
+      },
+      "schedule": {
+        "title": "房间日程",
+        "description": "每项格式 HH:MM=温度，用 / 或换行分隔，例如 06:00=22 / 09:00=19 / 17:00=22 / 23:00=20。留空表示恢复默认日程（06:00=22 / 09:00=19 / 17:00=22 / 23:00=20）。",
+        "data": {
+          "slots": "日程"
+        }
+      },
+      "heat_source": {
+        "title": "热源与天气补偿",
+        "description": "修改锅炉实体、室外温度来源、补偿曲线与设备语义核验。取消任一核验都会使集成退回“仅建议”模式。",
+        "data": {
+          "boiler_entity": "热源 climate 实体",
+          "burner_state_entity": "燃烧器状态传感器（可选）",
+          "supply_temp_entity": "供水温度传感器（可选）",
+          "return_temp_entity": "回水温度传感器（可选）",
+          "outdoor_temperature_entity": "室外温度传感器（可选）",
+          "outdoor_stale_minutes": "读数过期判定（分钟）",
+          "weather_mode": "天气补偿模式",
+          "outdoor_design": "设计室外温度",
+          "outdoor_stop": "曲线终点室外温度",
+          "supply_design": "设计点供水温度",
+          "supply_eco": "节能端供水温度",
+          "supply_min": "供水温度下限",
+          "supply_max": "供水温度上限",
+          "verify_set_hvac_mode_heating_only": "已确认：关闭采暖不影响生活热水",
+          "verify_set_temperature_is_supply": "已确认：设置温度是采暖供水温度",
+          "verify_min_flow_hydraulics": "已确认：水力条件已验收"
+        }
+      },
+      "diagnostics": {
+        "title": "诊断与恢复",
+        "description": "短循环判定阈值，以及重启后的写保护与周期一致性校验间隔。",
+        "data": {
+          "short_cycle_seconds": "短循环阈值（秒）",
+          "startup_grace": "启动宽限期（秒）",
+          "periodic_audit": "周期一致性校验（秒）"
+        }
+      }
+    },
+    "error": {
+      "zone_duplicate": "同一个温控器不能重复添加到两个区域。",
+      "zone_is_boiler": "热源实体不能同时作为房间温控器。",
+      "zone_not_found": "找不到该房间温控器实体。",
+      "boiler_not_found": "找不到该 climate 实体。",
+      "boiler_unavailable": "该 climate 实体当前不可用。",
+      "no_hvac_modes": "该实体没有报告任何 hvac_modes，无法确认可安全控制。",
+      "outdoor_not_found": "找不到该温度传感器实体。",
+      "invalid_schedule": "日程格式无效，请使用 HH:MM=温度，用 / 或换行分隔。",
+      "invalid_curve": "曲线参数无效。",
+      "invalid_range": "允许下限必须小于允许上限。",
+      "unknown": "发生未知错误，请检查日志。"
+    }
+  },
+  "selector": {
+    "control_mode": {
+      "options": {
+        "observe": "观察",
+        "coordinate": "协调",
+        "paused": "暂停"
+      }
+    },
+    "weather_mode": {
+      "options": {
+        "suggest": "仅建议（不写锅炉）",
+        "apply": "允许下发（需已核验语义）"
+      }
+    },
+    "mode": {
+      "options": {
+        "auto": "自动（按日程）",
+        "comfort": "舒适",
+        "eco": "节能",
+        "away": "外出",
+        "manual": "手动"
+      }
+    },
+    "override_policy": {
+      "options": {
+        "next_schedule": "下个日程节点恢复",
+        "fixed_duration": "固定时长后恢复",
+        "indefinite": "一直保持，直到手动恢复"
+      }
+    }
+  },
+  "entity": {
+    "select": {
+      "control_mode": {"name": "控制模式", "state": {"observe": "观察", "coordinate": "协调", "paused": "暂停"}},
+      "zone_mode": {"name": "房间模式", "state": {"auto": "自动", "comfort": "舒适", "eco": "节能", "away": "外出", "manual": "手动"}}
+    },
+    "sensor": {
+      "heating_state": {"name": "采暖状态", "state": {"observe": "观察", "idle": "无需求", "prepare": "准备", "heating": "采暖中", "satisfied": "已满足", "degraded": "受限"}},
+      "active_zones": {"name": "需求分区数"},
+      "suggested_supply_temp": {"name": "建议供水温度"},
+      "outdoor_temperature": {"name": "室外温度"},
+      "supply_temperature": {"name": "供水温度"},
+      "burner_starts_24h": {"name": "24 小时点火次数"},
+      "last_burn_duration": {"name": "最近一次燃烧时长"},
+      "effective_setpoint": {"name": "有效设定温度"},
+      "setpoint_source": {"name": "设定来源", "state": {"manual": "手动覆盖", "fixed_mode": "固定模式", "schedule": "日程", "cold_adjustment": "寒潮修正", "aux_load": "辅助负载", "fallback": "缺省"}},
+      "zone_temperature": {"name": "房间温度"},
+      "override_remaining": {"name": "手动覆盖剩余时间"}
+    },
+    "binary_sensor": {
+      "manual_override": {"name": "手动覆盖中"},
+      "short_cycle_alert": {"name": "短循环告警"},
+      "degraded": {"name": "受限运行"},
+      "heat_request": {"name": "采暖请求"}
+    },
+    "button": {
+      "resume_auto": {"name": "恢复自动"},
+      "reassess": {"name": "立即重新评估"}
+    },
+    "number": {
+      "supply_temperature_override": {"name": "供水温度手动设定"}
+    },
+    "switch": {
+      "auxiliary_load": {"name": "辅助热负载"}
+    },
+    "climate": {
+      "system_thermostat": {"name": "全屋采暖"}
+    }
+  },
+  "services": {
+    "resume_auto": {
+      "name": "恢复自动",
+      "description": "清除指定房间（或全部房间）的手动覆盖，立即回到日程目标。",
+      "fields": {"zone_id": {"name": "房间 ID", "description": "留空表示全部房间。"}}
+    },
+    "set_supply_temperature": {
+      "name": "设置供水温度",
+      "description": "显式设置锅炉供水温度，受设备能力与已核验语义约束。",
+      "fields": {"temperature": {"name": "目标供水温度"}}
+    },
+    "reassess": {
+      "name": "立即重新评估",
+      "description": "立刻重跑一次仲裁与热源评估，不等下一个周期。"
+    }
+  }
+}

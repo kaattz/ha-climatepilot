@@ -1,0 +1,111 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff check
+        run: ruff check custom_components/ tests/ tools/
+
+      - name: Ruff format check
+        run: ruff format --check custom_components/ tests/ tools/
+
+      - name: Byte-compile the integration
+        run: python -m compileall -q custom_components/
+
+  manifest:
+    name: Manifest and translations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Validate JSON files
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          paths = [
+              "hacs.json",
+              "custom_components/climatepilot/manifest.json",
+              "custom_components/climatepilot/strings.json",
+              "custom_components/climatepilot/translations/en.json",
+              "custom_components/climatepilot/translations/zh-Hans.json",
+          ]
+          for path in paths:
+              json.loads(Path(path).read_text(encoding="utf-8"))
+              print(f"ok {path}")
+          PY
+
+      - name: Translations must stay in sync with strings.json
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          base = Path("custom_components/climatepilot")
+
+          def flatten(node, prefix=""):
+              keys = set()
+              if isinstance(node, dict):
+                  for key, value in node.items():
+                      keys.add(f"{prefix}.{key}" if prefix else key)
+                      keys |= flatten(value, f"{prefix}.{key}" if prefix else key)
+              return keys
+
+          source = json.loads((base / "strings.json").read_text(encoding="utf-8"))
+          source_keys = flatten(source)
+
+          # Entity translation keys must all be present in every translation.
+          missing = []
+          for translation in ("en.json", "zh-Hans.json"):
+              data = json.loads((base / "translations" / translation).read_text(encoding="utf-8"))
+              keys = flatten(data)
+              absent = source_keys - keys
+              if absent:
+                  missing.append((translation, sorted(absent)))
+
+          if missing:
+              for translation, keys in missing:
+                  print(f"{translation} is missing {len(keys)} keys: {keys[:20]}")
+              raise SystemExit(1)
+          print("translations in sync")
+          PY
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Home Assistant and pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install homeassistant pytest pytest-asyncio
+
+      - name: Run tests
+        run: python -m pytest -q

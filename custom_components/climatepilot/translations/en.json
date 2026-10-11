@@ -1,0 +1,268 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ClimatePilot heating system",
+        "description": "Create a heating system. Rooms and strategies can be added afterwards from Configure.",
+        "data": {
+          "system_name": "System name"
+        }
+      },
+      "boiler": {
+        "title": "Heat source",
+        "description": "Select the boiler/heat-pump climate entity plus optional burner-state and supply/return temperature sensors.",
+        "data": {
+          "boiler_entity": "Heat source climate entity",
+          "burner_state_entity": "Burner state sensor (optional)",
+          "supply_temp_entity": "Supply temperature sensor (optional)",
+          "return_temp_entity": "Return temperature sensor (optional)"
+        }
+      },
+      "verify": {
+        "title": "Device semantics check",
+        "description": "These behaviours must be confirmed before ClimatePilot writes to the heat source. {unverified_count} are currently unconfirmed; while any of them is, the integration stays in suggest-only mode and will neither start/stop the heat source nor send a supply temperature. Only tick a box once it has been verified on the real installation.",
+        "data": {
+          "verify_set_hvac_mode_heating_only": "Confirmed: turning heating off does not affect domestic hot water or frost protection",
+          "verify_set_temperature_is_supply": "Confirmed: the setpoint is the heating supply temperature (not room temperature, not DHW)",
+          "verify_min_flow_hydraulics": "Confirmed: minimum flow and bypass/hydraulic decoupling signed off by the installer"
+        }
+      },
+      "outdoor": {
+        "title": "Outdoor temperature and weather compensation",
+        "description": "Choose the outdoor temperature source. An invalid or stale reading is never guessed as 0 °C; the last confirmed safe value is kept instead. You may leave this empty and configure it later.",
+        "data": {
+          "outdoor_temperature_entity": "Outdoor temperature sensor (optional)",
+          "outdoor_stale_minutes": "Reading considered stale after (minutes)"
+        }
+      },
+      "weather_curve": {
+        "title": "Weather compensation curve",
+        "description": "A linear curve defined by two points; values outside the range are clamped. Initial suggestion for a Wenzhou wet floor-heating system: 0 °C outdoor to 45 °C, 15 °C outdoor to 40 °C.",
+        "data": {
+          "outdoor_design": "Design outdoor temperature",
+          "outdoor_stop": "Curve end outdoor temperature",
+          "supply_design": "Supply temperature at the design point",
+          "supply_eco": "Supply temperature at the eco end",
+          "supply_min": "Minimum supply temperature",
+          "supply_max": "Maximum supply temperature"
+        }
+      },
+      "zones": {
+        "title": "Heating zones",
+        "description": "Add the KNX room thermostats for this system. ClimatePilot only reads and writes these climate entities; it never drives valves directly. You can start with none and add rooms later from Configure.",
+        "data": {
+          "zones": "Room thermostats"
+        }
+      },
+      "control_mode": {
+        "title": "Control mode",
+        "description": "Running in Observe for a few days first is recommended; switch to Coordinate once the readings and demand detection look right.",
+        "data": {
+          "control_mode": "Control mode"
+        }
+      }
+    },
+    "error": {
+      "boiler_not_found": "That climate entity could not be found.",
+      "boiler_unavailable": "That climate entity is currently unavailable.",
+      "no_hvac_modes": "The entity reports no hvac_modes, so safe control cannot be confirmed.",
+      "outdoor_not_found": "That temperature sensor could not be found.",
+      "zone_duplicate": "The same thermostat cannot be assigned to two zones.",
+      "zone_is_boiler": "The heat source entity cannot also be a room thermostat.",
+      "zone_not_found": "That room thermostat could not be found.",
+      "invalid_curve": "Invalid curve: outdoor_stop must exceed outdoor_design, supply_max must exceed supply_min, and both supply points must lie inside that window.",
+      "invalid_range": "The allowed minimum must be lower than the allowed maximum.",
+      "unknown": "Unknown error, check the logs."
+    },
+    "abort": {
+      "already_configured": "This system is already configured.",
+      "single_instance_allowed": "ClimatePilot currently supports a single heating system."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ClimatePilot settings",
+        "menu_options": {
+          "zones": "Zones and thermostats",
+          "strategies": "Temperature strategies and schedules",
+          "heat_source": "Heat source and weather compensation",
+          "diagnostics": "Diagnostics and recovery"
+        }
+      },
+      "zones": {
+        "title": "Zones and thermostats",
+        "description": "Add or remove rooms. Removing a room never deletes the KNX device; it only stops coordinating it, and the other rooms keep their strategies and schedules.",
+        "data": {
+          "zones": "Room thermostats"
+        }
+      },
+      "strategies": {
+        "title": "Temperature strategies and schedules",
+        "description": "Pick the room to edit.",
+        "data": {
+          "zone_id": "Room"
+        }
+      },
+      "zone_menu": {
+        "title": "Room strategy",
+        "menu_options": {
+          "zone_detail": "Strategy parameters",
+          "schedule": "Daily schedule"
+        }
+      },
+      "zone_detail": {
+        "title": "Room strategy parameters",
+        "description": "The base target comes from the schedule or a fixed mode. Automatic adjustments never apply while a manual override is active. The allowed range is intersected with what the thermostat itself reports.",
+        "data": {
+          "name": "Name",
+          "mode": "Mode",
+          "min_temp": "Allowed minimum",
+          "max_temp": "Allowed maximum",
+          "target_step": "Thermostat step",
+          "tolerance": "Readback tolerance",
+          "override_policy": "Manual override restore policy",
+          "override_minutes": "Fixed duration (minutes)",
+          "cold_adjustment": "Allow cold-snap room adjustment",
+          "aux_load": "Allow as auxiliary heat load"
+        }
+      },
+      "schedule": {
+        "title": "Room schedule",
+        "description": "One entry as HH:MM=temperature, separated by / or newlines, e.g. 06:00=22 / 09:00=19 / 17:00=22 / 23:00=20. Leave empty to restore the default schedule (06:00=22 / 09:00=19 / 17:00=22 / 23:00=20).",
+        "data": {
+          "slots": "Schedule"
+        }
+      },
+      "heat_source": {
+        "title": "Heat source and weather compensation",
+        "description": "Change the boiler entity, the outdoor temperature source, the compensation curve and the device-semantics attestations. Clearing any attestation sends the integration back to suggest-only mode.",
+        "data": {
+          "boiler_entity": "Heat source climate entity",
+          "burner_state_entity": "Burner state sensor (optional)",
+          "supply_temp_entity": "Supply temperature sensor (optional)",
+          "return_temp_entity": "Return temperature sensor (optional)",
+          "outdoor_temperature_entity": "Outdoor temperature sensor (optional)",
+          "outdoor_stale_minutes": "Reading considered stale after (minutes)",
+          "weather_mode": "Weather compensation mode",
+          "outdoor_design": "Design outdoor temperature",
+          "outdoor_stop": "Curve end outdoor temperature",
+          "supply_design": "Supply temperature at the design point",
+          "supply_eco": "Supply temperature at the eco end",
+          "supply_min": "Minimum supply temperature",
+          "supply_max": "Maximum supply temperature",
+          "verify_set_hvac_mode_heating_only": "Confirmed: turning heating off does not affect DHW",
+          "verify_set_temperature_is_supply": "Confirmed: the setpoint is the heating supply temperature",
+          "verify_min_flow_hydraulics": "Confirmed: hydraulics signed off"
+        }
+      },
+      "diagnostics": {
+        "title": "Diagnostics and recovery",
+        "description": "Short-cycle detection threshold, plus the write-protection window after a restart and the periodic consistency audit interval.",
+        "data": {
+          "short_cycle_seconds": "Short-cycle threshold (seconds)",
+          "startup_grace": "Startup grace period (seconds)",
+          "periodic_audit": "Periodic consistency audit (seconds)"
+        }
+      }
+    },
+    "error": {
+      "zone_duplicate": "The same thermostat cannot be assigned to two zones.",
+      "zone_is_boiler": "The heat source entity cannot also be a room thermostat.",
+      "zone_not_found": "That room thermostat could not be found.",
+      "boiler_not_found": "That climate entity could not be found.",
+      "boiler_unavailable": "That climate entity is currently unavailable.",
+      "no_hvac_modes": "The entity reports no hvac_modes, so safe control cannot be confirmed.",
+      "outdoor_not_found": "That temperature sensor could not be found.",
+      "invalid_schedule": "Invalid schedule. Use HH:MM=temperature separated by / or newlines.",
+      "invalid_curve": "Invalid curve parameters.",
+      "invalid_range": "The allowed minimum must be lower than the allowed maximum.",
+      "unknown": "Unknown error, check the logs."
+    }
+  },
+  "selector": {
+    "control_mode": {
+      "options": {
+        "observe": "Observe",
+        "coordinate": "Coordinate",
+        "paused": "Paused"
+      }
+    },
+    "weather_mode": {
+      "options": {
+        "suggest": "Suggest only (never writes the boiler)",
+        "apply": "Allow writes (requires verified semantics)"
+      }
+    },
+    "mode": {
+      "options": {
+        "auto": "Automatic (follow the schedule)",
+        "comfort": "Comfort",
+        "eco": "Eco",
+        "away": "Away",
+        "manual": "Manual"
+      }
+    },
+    "override_policy": {
+      "options": {
+        "next_schedule": "Restore at the next schedule point",
+        "fixed_duration": "Restore after a fixed duration",
+        "indefinite": "Keep until resumed manually"
+      }
+    }
+  },
+  "entity": {
+    "select": {
+      "control_mode": {"name": "Control mode", "state": {"observe": "Observe", "coordinate": "Coordinate", "paused": "Paused"}},
+      "zone_mode": {"name": "Room mode", "state": {"auto": "Auto", "comfort": "Comfort", "eco": "Eco", "away": "Away", "manual": "Manual"}}
+    },
+    "sensor": {
+      "heating_state": {"name": "Heating state", "state": {"observe": "Observe", "idle": "Idle", "prepare": "Prepare", "heating": "Heating", "satisfied": "Satisfied", "degraded": "Degraded"}},
+      "active_zones": {"name": "Zones demanding heat"},
+      "suggested_supply_temp": {"name": "Suggested supply temperature"},
+      "outdoor_temperature": {"name": "Outdoor temperature"},
+      "supply_temperature": {"name": "Supply temperature"},
+      "burner_starts_24h": {"name": "Burner starts (24 h)"},
+      "last_burn_duration": {"name": "Last burn duration"},
+      "effective_setpoint": {"name": "Effective setpoint"},
+      "setpoint_source": {"name": "Setpoint source", "state": {"manual": "Manual override", "fixed_mode": "Fixed mode", "schedule": "Schedule", "cold_adjustment": "Cold-snap adjustment", "aux_load": "Auxiliary load", "fallback": "Fallback"}},
+      "zone_temperature": {"name": "Room temperature"},
+      "override_remaining": {"name": "Manual override remaining"}
+    },
+    "binary_sensor": {
+      "manual_override": {"name": "Manual override active"},
+      "short_cycle_alert": {"name": "Short cycle alert"},
+      "degraded": {"name": "Degraded operation"},
+      "heat_request": {"name": "Heat request"}
+    },
+    "button": {
+      "resume_auto": {"name": "Resume automatic"},
+      "reassess": {"name": "Reassess now"}
+    },
+    "number": {
+      "supply_temperature_override": {"name": "Manual supply temperature"}
+    },
+    "switch": {
+      "auxiliary_load": {"name": "Auxiliary heat load"}
+    },
+    "climate": {
+      "system_thermostat": {"name": "Whole-home heating"}
+    }
+  },
+  "services": {
+    "resume_auto": {
+      "name": "Resume automatic",
+      "description": "Clear the manual override for one room (or all rooms) and return to the schedule target.",
+      "fields": {"zone_id": {"name": "Zone id", "description": "Leave empty for every room."}}
+    },
+    "set_supply_temperature": {
+      "name": "Set supply temperature",
+      "description": "Explicitly set the boiler supply temperature, bounded by device capabilities and the verified semantics.",
+      "fields": {"temperature": {"name": "Target supply temperature"}}
+    },
+    "reassess": {
+      "name": "Reassess now",
+      "description": "Run arbitration and heat-source evaluation immediately instead of waiting for the next cycle."
+    }
+  }
+}

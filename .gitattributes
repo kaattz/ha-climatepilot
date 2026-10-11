@@ -1,0 +1,14 @@
+# Normalise line endings so the repository is consistent across platforms.
+# Home Assistant runs on Linux; developing on Windows must not rewrite the files.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending converted.
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.gz binary
+
+# Generated / vendored content is not diffed.
+*.pyc -text
+__pycache__/ -text
