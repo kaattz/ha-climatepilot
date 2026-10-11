@@ -1,15 +1,35 @@
 """Generate the ClimatePilot brand assets.
 
-Home Assistant renders a brand image for each integration in the "Add
-integration" dialog and on the integration card. The local override lives at
-``custom_components/<domain>/brand/`` and takes precedence over the remote
-brands CDN.
+Home Assistant serves brand images from a local ``brand/`` directory inside a
+custom integration (see "Brand images" in the developer docs; the loader exposes
+``Integration.has_branding`` for any integration whose top-level files include
+``brand``). Local images take precedence over the brands CDN, which matters here:
+ClimatePilot is a private project and is not in the brands repository.
 
-The mark: a house silhouette with three rising heat waves inside it, coloured on
-an amber-to-ember gradient. It reads as "a home being warmed" without using any
-symbol that already means something else - an early draft used a plus inside the
-house and read unmistakably as a medical/red-cross badge, which is exactly the
-kind of accidental meaning a brand mark must avoid.
+What Home Assistant actually requests
+-------------------------------------
+``homeassistant/components/brands/const.py`` defines the allowed set:
+
+    icon.png  logo.png  icon@2x.png  logo@2x.png
+    dark_icon.png  dark_logo.png  dark_icon@2x.png  dark_logo@2x.png
+
+and an ``IMAGE_FALLBACKS`` chain used when a requested image is absent. The dark
+variants fall back to their **light** counterparts, so shipping only the light
+set does not produce "no image" - it produces the light image in a dark UI. Our
+light icon carries an opaque white plate, which is right on a light background
+and glaring on a dark one. Hence all eight are generated.
+
+Two design constraints drive the geometry
+-----------------------------------------
+1. **Legibility at 24 px.** That is the size Home Assistant uses in entity and
+   integration lists. An earlier revision drew three hairline waves ~1 px thick
+   at 24 px; they blurred into a smudge and the thin house outline faded. The
+   mark is therefore drawn with a much heavier stroke, so it survives
+   downscaling.
+2. **No false meaning.** A still earlier draft put a plus sign inside the house
+   and read unmistakably as a medical / red-cross badge. The theme is now
+   carried by colour and by the rising waves, with no symbol that already means
+   something else.
 
 Drawn from primitives so the asset is reproducible and reviewable rather than an
 opaque binary.
@@ -33,124 +53,158 @@ AMBER = (245, 158, 11, 255)
 EMBER = (214, 69, 43, 255)
 WHITE = (255, 255, 255, 255)
 
+#: Dark-mode plate and ink. Not pure black: a dark grey separates the mark from
+#: a near-black background the way Home Assistant's dark theme reads.
+DARK_PLATE = (28, 33, 43, 255)
+DARK_INK = (232, 238, 245, 255)
+
 SUPERSAMPLE = 4
 
-
-def _lerp(
-    a: tuple[int, int, int, int], b: tuple[int, int, int, int], t: float
-) -> tuple[int, int, int, int]:
-    return tuple(round(x + (y - x) * t) for x, y in zip(a, b, strict=True))  # type: ignore[return-value]
-
-
-def _draw_wave(
-    draw: ImageDraw.ImageDraw,
-    origin_x: float,
-    base_y: float,
-    width: float,
-    height: float,
-    *,
-    stroke: int,
-    colour: tuple[int, int, int, int],
-) -> None:
-    """Draw one vertical heat wave (an S-curve) rising upward."""
-    steps = 40
-    points: list[tuple[float, float]] = []
-    for index in range(steps + 1):
-        t = index / steps
-        y = base_y - height * t
-        # A sine offset across the height gives the classic "heat rising" wave.
-        x = origin_x + math.sin(t * math.pi * 2.0) * (width * 0.5)
-        points.append((x, y))
-    for index in range(len(points) - 1):
-        # Fade from ember at the bottom to amber at the top.
-        t = index / (len(points) - 1)
-        draw.line(
-            [points[index], points[index + 1]],
-            fill=_lerp(colour, _lerp(EMBER, AMBER, 1.0), t),
-            width=stroke,
-            joint="curve",
-        )
+#: Geometry as a fraction of the canvas. Kept in one place so the light and dark
+#: variants stay pixel-identical apart from colour.
+#:
+#: These values were chosen by rendering candidates and inspecting them at 24 px
+#: (Home Assistant's list size), not by taste at full resolution. Two bold waves
+#: beat three thin ones decisively: at 24 px three strokes merged into a single
+#: orange smudge, whereas two read as distinct shapes. The house outline is
+#: correspondingly heavier so it survives the same downscale.
+STROKE = 0.100  # house outline
+WAVE_STROKE = 0.100  # a single wave
+ROOF_PEAK = (0.50, 0.115)
+ROOF_LEFT = (0.075, 0.455)
+ROOF_RIGHT = (0.925, 0.455)
+BODY_LEFT = 0.165
+BODY_RIGHT = 0.835
+BODY_TOP = 0.435
+BODY_BOTTOM = 0.875
+WAVE_BASE_Y = 0.835
+WAVE_HEIGHT = 0.360
+WAVE_WIDTH = 0.140
+WAVE_CENTRES = (0.390, 0.610)
 
 
-def draw_mark(size: int, *, with_background: bool) -> Image.Image:
-    """Render the ClimatePilot mark at ``size`` x ``size`` pixels."""
+def _lerp(a: tuple[int, int, int, int], b: tuple[int, int, int, int], t: float):
+    return tuple(round(x + (y - x) * t) for x, y in zip(a, b, strict=True))
+
+
+def _draw_mark(size: int, *, plate: tuple[int, int, int, int] | None, ink) -> Image.Image:
+    """Render the mark at ``size`` x ``size``.
+
+    ``plate`` is the rounded-square background, or ``None`` for a transparent
+    field. ``ink`` is the colour of the house outline; the waves always keep
+    their warm gradient because that is what carries the "heating" meaning.
+    """
     s = size * SUPERSAMPLE
     image = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    if with_background:
-        draw.rounded_rectangle([0, 0, s - 1, s - 1], radius=int(s * 0.22), fill=WHITE)
+    if plate is not None:
+        draw.rounded_rectangle([0, 0, s - 1, s - 1], radius=int(s * 0.22), fill=plate)
 
-    stroke = max(3, int(s * 0.055))
+    stroke = max(2, int(s * STROKE))
 
-    # --- house silhouette --------------------------------------------------
-    # A roof triangle over a body, with generous internal space for the waves.
-    peak = (s * 0.50, s * 0.13)
-    roof_left = (s * 0.09, s * 0.47)
-    roof_right = (s * 0.91, s * 0.47)
-    body_left = s * 0.19
-    body_right = s * 0.81
-    body_top = s * 0.45
-    body_bottom = s * 0.89
+    # --- house silhouette ------------------------------------------------
+    peak = (s * ROOF_PEAK[0], s * ROOF_PEAK[1])
+    roof_left = (s * ROOF_LEFT[0], s * ROOF_LEFT[1])
+    roof_right = (s * ROOF_RIGHT[0], s * ROOF_RIGHT[1])
+    body_left = s * BODY_LEFT
+    body_right = s * BODY_RIGHT
+    body_top = s * BODY_TOP
+    body_bottom = s * BODY_BOTTOM
 
-    draw.line([roof_left, peak], fill=SLATE, width=stroke, joint="curve")
-    draw.line([peak, roof_right], fill=SLATE, width=stroke, joint="curve")
-    draw.line([(body_left, body_top), (body_left, body_bottom)], fill=SLATE, width=stroke)
-    draw.line(
-        [(body_right, body_top), (body_right, body_bottom)],
-        fill=SLATE,
-        width=stroke,
-    )
-    draw.line(
-        [(body_left, body_bottom), (body_right, body_bottom)],
-        fill=SLATE,
-        width=stroke,
-    )
+    draw.line([roof_left, peak], fill=ink, width=stroke, joint="curve")
+    draw.line([peak, roof_right], fill=ink, width=stroke, joint="curve")
+    draw.line([(body_left, body_top), (body_left, body_bottom)], fill=ink, width=stroke)
+    draw.line([(body_right, body_top), (body_right, body_bottom)], fill=ink, width=stroke)
+    draw.line([(body_left, body_bottom), (body_right, body_bottom)], fill=ink, width=stroke)
 
-    # --- three rising heat waves ------------------------------------------
-    wave_stroke = max(2, int(s * 0.042))
-    centre_y = s * 0.795
-    wave_height = s * 0.26
-    wave_width = s * 0.10
-    for centre_x in (s * 0.35, s * 0.50, s * 0.65):
-        _draw_wave(
-            draw,
-            centre_x,
-            centre_y,
-            wave_width,
-            wave_height,
-            stroke=wave_stroke,
-            colour=EMBER,
-        )
+    # --- rising heat waves -----------------------------------------------
+    # Thicker strokes than the first revision: at 24 px three hairline waves
+    # merged into a smudge, so legibility wins over decorative detail.
+    wave_stroke = max(1, int(s * WAVE_STROKE))
+    base_y = s * WAVE_BASE_Y
+    height = s * WAVE_HEIGHT
+    width = s * WAVE_WIDTH
+
+    for centre_x in WAVE_CENTRES:
+        steps = 44
+        points: list[tuple[float, float]] = []
+        for index in range(steps + 1):
+            t = index / steps
+            y = base_y - height * t
+            x = s * centre_x + math.sin(t * math.pi * 2.0) * (width * 0.5)
+            points.append((x, y))
+
+        for index in range(len(points) - 1):
+            t = index / (len(points) - 1)
+            # Ember at the bottom (nearest the floor), amber at the top.
+            colour = _lerp(EMBER, AMBER, t)
+            draw.line(
+                [points[index], points[index + 1]],
+                fill=colour,
+                width=wave_stroke,
+                joint="curve",
+            )
 
     return image.resize((size, size), Image.LANCZOS)
 
 
-def draw_logo(width: int, height: int) -> Image.Image:
-    """Render the wider logo: the mark on a transparent field."""
+def draw_icon(size: int, *, dark: bool) -> Image.Image:
+    """Square icon: mark on a rounded plate.
+
+    The plate is what makes an icon look deliberate in Home Assistant's rounded
+    list rows; the dark variant swaps it for a dark surface so it does not read
+    as a bright white tile.
+    """
+    return _draw_mark(
+        size,
+        plate=DARK_PLATE if dark else WHITE,
+        ink=DARK_INK if dark else SLATE,
+    )
+
+
+def draw_logo(width: int, height: int, *, dark: bool) -> Image.Image:
+    """Rectangular logo: the mark on a transparent field.
+
+    Logos appear on the integration page where the surrounding surface already
+    provides contrast, so they stay transparent in both modes - but the outline
+    still switches colour, otherwise the dark-mode logo would be dark ink on a
+    dark background.
+    """
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     mark_size = int(height * 0.90)
-    mark = draw_mark(mark_size, with_background=False)
+    mark = _draw_mark(mark_size, plate=None, ink=DARK_INK if dark else SLATE)
     image.alpha_composite(mark, (int((width - mark_size) / 2), int((height - mark_size) / 2)))
     return image
 
 
 def main() -> int:
     BRAND_DIR.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
 
-    # Home Assistant reads icon.png and icon@2x.png from the brand directory.
-    draw_mark(256, with_background=True).save(BRAND_DIR / "icon.png")
-    draw_mark(512, with_background=True).save(BRAND_DIR / "icon@2x.png")
+    def save(image: Image.Image, path: Path) -> None:
+        image.save(path)
+        written.append(path)
 
-    draw_logo(512, 256).save(BRAND_DIR / "logo.png")
-    draw_logo(1024, 512).save(BRAND_DIR / "logo@2x.png")
+    # All eight names Home Assistant may request. Shipping the dark set matters:
+    # the fallback chain resolves a missing dark_* to its light counterpart, so
+    # omitting them is not "no image" but "the light image on a dark surface".
+    save(draw_icon(256, dark=False), BRAND_DIR / "icon.png")
+    save(draw_icon(512, dark=False), BRAND_DIR / "icon@2x.png")
+    save(draw_icon(256, dark=True), BRAND_DIR / "dark_icon.png")
+    save(draw_icon(512, dark=True), BRAND_DIR / "dark_icon@2x.png")
 
-    # Repository-level preview (what GitHub shows for the project).
-    draw_logo(1280, 640).save(ROOT / "logo.png")
+    save(draw_logo(512, 256, dark=False), BRAND_DIR / "logo.png")
+    save(draw_logo(1024, 512, dark=False), BRAND_DIR / "logo@2x.png")
+    save(draw_logo(512, 256, dark=True), BRAND_DIR / "dark_logo.png")
+    save(draw_logo(1024, 512, dark=True), BRAND_DIR / "dark_logo@2x.png")
 
-    for path in sorted(BRAND_DIR.iterdir()):
+    # Repository-level preview: what GitHub shows on the project page. Light
+    # only, because GitHub renders one image regardless of theme.
+    save(draw_logo(1280, 640, dark=False), ROOT / "logo.png")
+
+    for path in written:
         print(f"wrote {path.relative_to(ROOT)} ({path.stat().st_size} bytes)")
-    print(f"wrote logo.png ({(ROOT / 'logo.png').stat().st_size} bytes)")
     return 0
 
 

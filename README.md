@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="custom_components/climatepilot/brand/icon@2x.png" alt="ClimatePilot" width="128">
+
 # ClimatePilot · 智暖领航
 
 **多区域采暖协调与优化 · Multi-zone heating coordination for Home Assistant**
@@ -16,6 +18,29 @@ by [HomeAxis](https://github.com/kaattz)
 > 见 [CHANGELOG.md](CHANGELOG.md)。
 
 </div>
+
+---
+
+## 集成图标
+
+集成自带品牌资源（`custom_components/climatepilot/brand/`），Home Assistant
+**优先使用本地图片**，无需向官方 brands 仓库提交。
+
+| 文件 | 用途 |
+|---|---|
+| `icon.png` / `icon@2x.png` | 列表与设备页的方形图标（@2x 用于高分屏） |
+| `logo.png` / `logo@2x.png` | 集成配置页的矩形图标 |
+| `dark_*.png` | **深色主题**版本（4 个） |
+
+**为什么必须同时提供深色版本**：HA 在深色主题下请求 `dark_icon.png`，
+若缺失会按 `IMAGE_FALLBACKS` 回退到**浅色版**——不是"没有图片"，而是把
+**白底图标显示在深色界面上**，在深色主题下是一块刺眼的白方块。
+`tests/test_brand_assets.py` 会校验 8 个文件齐全、深色版确实与浅色版不同、
+且在 24px 列表尺寸下仍可辨认。
+
+图标由 `tools/make_brand_assets.py` 用几何图元生成（可复现、可审查，
+不是不可读的二进制）。改动后请重新运行该脚本；测试会校验签入的资源
+与生成器输出一致。
 
 ---
 
