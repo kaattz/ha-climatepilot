@@ -120,6 +120,27 @@ class ClimatePilotEntity(CoordinatorEntity["ClimatePilotCoordinator"]):
         self._attr_unique_id = f"{coordinator.system_id}_{key}"
         self._key = key
 
+    def add_to_platform_start(
+        self,
+        hass: Any,
+        platform: Any,
+        parallel_add_tasks: Any,
+    ) -> None:
+        """Pin our entity id before Home Assistant derives one.
+
+        This is the earliest point the domain is known: ``self.platform`` does
+        not exist during ``__init__``, and the domain is the id prefix. Setting
+        the id here rather than passing a domain through every entity
+        constructor keeps the naming scheme in one place, so the ~40 entity
+        classes and the seven platform modules need no changes.
+
+        ``platform.domain`` is the entity domain (sensor/switch/climate/...);
+        ``platform.platform_name`` is the integration name (``climatepilot``)
+        and would produce ids like ``climatepilot.heating_state``.
+        """
+        self.entity_id = entity_id_for(platform.domain, self._key)
+        super().add_to_platform_start(hass, platform, parallel_add_tasks)
+
     @property
     def device_info(self) -> DeviceInfo:
         """Return the system-level device this entity belongs to."""

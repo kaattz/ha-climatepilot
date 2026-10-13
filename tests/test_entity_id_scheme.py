@@ -91,3 +91,60 @@ def test_prefix_is_a_module_constant() -> None:
 
     assert ENTITY_ID_PREFIX == "cp"
     assert entity_id_for("sensor", "heating_state") == f"sensor.{ENTITY_ID_PREFIX}_heating_state"
+
+
+def test_base_entity_sets_its_id_from_the_platform_domain() -> None:
+    """The id must be set in ``add_to_platform_start``, not ``__init__``.
+
+    ``self.platform`` is only assigned during ``add_to_platform_start``, so the
+    entity cannot know its domain any earlier - and the domain is the id prefix.
+    Setting it in ``__init__`` would need the domain passed through every one of
+    the ~40 entity constructors instead of living in one method here.
+
+    The check reads the *whole module* and strips docstrings before matching.
+    Checking the raw source would match the explanatory comment above the call
+    (which names ``platform_name`` to say why it is wrong) and fail a correct
+    implementation.
+    """
+    import ast
+    from pathlib import Path
+
+    from custom_components.climatepilot import base as base_module
+
+    assert hasattr(base_module.ClimatePilotEntity, "add_to_platform_start"), (
+        "the base class must override add_to_platform_start to pin the id"
+    )
+
+    tree = ast.parse(Path(base_module.__file__).read_text(encoding="utf-8"))
+    # Drop every docstring so only executable code remains.
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        node.body = [
+            stmt
+            for stmt in node.body
+            if not (
+                isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)
+            )
+        ] or [ast.Pass()]
+
+    code = ast.unparse(tree)
+    method = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "add_to_platform_start"
+    )
+    body = ast.unparse(method)
+
+    assert "platform.domain" in body, (
+        "must use platform.domain (sensor/switch/climate), not "
+        "platform.platform_name (which is the integration name, climatepilot)"
+    )
+    assert "platform_name" not in body, (
+        "platform_name is the integration name and would give ids like climatepilot.heating_state"
+    )
+    assert "entity_id_for" in body
+    assert "super()" in body, "must still run HA's own setup"
+    assert code  # the module still parses after docstring removal
