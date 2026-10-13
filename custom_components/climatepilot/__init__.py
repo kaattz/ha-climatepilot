@@ -26,9 +26,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry
 from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.typing import ConfigType
 
+from .base import ENTITY_ID_PREFIX
 from .const import (
     CONF_ZONE_ENTITY,
     CONF_ZONE_ID,
@@ -39,6 +41,7 @@ from .const import (
     SERVICE_SET_SUPPLY_TEMPERATURE,
 )
 from .coordinator import ClimatePilotCoordinator
+from .migration import migrate_entity_ids
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -121,6 +124,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.async_setup_listeners()
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    # Rename any pre-V0.4 entity ids *before* the platforms load. Renaming after
+    # they load would leave both the old and the new id briefly registered, and a
+    # dashboard referencing one of them would resolve at random.
+    #
+    # This exists because Home Assistant pins `entity_id` in the registry against
+    # the `unique_id`, so changing the naming code renames nothing on a system
+    # that is already installed.
+    renamed = migrate_entity_ids(entity_registry.async_get(hass), entry.entry_id)
+    if renamed:
+        _LOGGER.info(
+            "ClimatePilot renamed %d entity ids to the %s_ prefix",
+            renamed,
+            ENTITY_ID_PREFIX,
+        )
 
     await _async_register_services(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

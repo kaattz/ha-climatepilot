@@ -2485,6 +2485,16 @@ async def test_async_setup_entry_registers_coordinator_services_and_platforms(
         ),
     )
 
+    # ``async_setup_entry`` runs the entity-id migration before forwarding the
+    # platforms, and that needs an entity registry. A double with no rows keeps
+    # this test about what it is named for (services and platform forwarding);
+    # the migration itself is covered by tests/test_entity_id_migration.py.
+    registry = SimpleNamespace(entities=[], async_update_entity=Mock())
+    monkeypatch.setattr(
+        "custom_components.climatepilot.entity_registry",
+        SimpleNamespace(async_get=Mock(return_value=registry)),
+    )
+
     coordinator_cls = Mock(return_value=coordinator)
     coordinator.async_config_entry_first_refresh = AsyncMock()
     coordinator.async_setup_listeners = Mock()
