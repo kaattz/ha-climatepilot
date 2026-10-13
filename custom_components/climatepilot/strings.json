@@ -14,7 +14,6 @@
         "data": {
           "boiler_entity": "Heat source climate entity",
           "burner_state_entity": "Burner state sensor (optional)",
-          "supply_temp_entity": "Supply temperature sensor (optional)",
           "return_temp_entity": "Return temperature sensor (optional)",
           "supply_probe_entity": "External supply pipe probe (optional)"
         }
@@ -142,7 +141,6 @@
         "data": {
           "boiler_entity": "Heat source climate entity",
           "burner_state_entity": "Burner state sensor (optional)",
-          "supply_temp_entity": "Supply temperature sensor (optional)",
           "return_temp_entity": "Return temperature sensor (optional)",
           "outdoor_temperature_entity": "Outdoor temperature sensor (optional)",
           "outdoor_stale_minutes": "Reading considered stale after (minutes)",

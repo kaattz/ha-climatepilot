@@ -343,14 +343,47 @@ def test_boiler_accepts_optional_sensors() -> None:
             {
                 CONF_BOILER_ENTITY: BOILER,
                 "burner_state_entity": "sensor.burner_state",
-                "supply_temp_entity": None,
                 "return_temp_entity": None,
             },
         )
     )
     expect_form(result, cf.STEP_VERIFY)
     assert flow._config["burner_state_entity"] == "sensor.burner_state"
-    assert flow._config["supply_temp_entity"] is None
+    assert flow._config["return_temp_entity"] is None
+
+
+def test_boiler_form_has_no_supply_temp_entity_field() -> None:
+    """The ``supply_temp_entity`` field was removed; it never did anything.
+
+    It was collected by both flows and persisted into the options, but nothing
+    ever read it: the supply temperature comes from the boiler climate entity's
+    own ``temperature`` attribute. A field that accepts a value and silently
+    ignores it is worse than no field at all, because it invites the user to
+    believe they have configured something.
+
+    For the reference installation it was doubly pointless - the Rinnai
+    integration's ``heating_temperature`` sensor and the boiler entity's
+    ``temperature`` both read the same ``heatingTempSetting`` value, so pointing
+    at it would have changed nothing.
+
+    The two probe fields stay: those *are* read (by the ΔT engine).
+    """
+    from custom_components.climatepilot import const
+    from custom_components.climatepilot import options_flow as of
+
+    # The key is gone from const entirely, so no flow can collect it again by
+    # importing the name.
+    assert not hasattr(const, "CONF_SUPPLY_TEMP_ENTITY"), (
+        "the dead configuration key must not exist"
+    )
+    assert "supply_temp_entity" not in of.BOILER_SENSOR_KEYS, (
+        "the dead field must not be collected by the forms"
+    )
+    assert of.CONF_SUPPLY_PROBE_ENTITY in of.BOILER_SENSOR_KEYS
+    assert of.CONF_RETURN_TEMP_ENTITY in of.BOILER_SENSOR_KEYS
+    # The temperature-selector subset is derived from the same tuple, so it must
+    # follow automatically rather than be maintained separately.
+    assert "supply_temp_entity" not in of.BOILER_TEMPERATURE_KEYS
 
 
 # ---------------------------------------------------------------------------

@@ -31,7 +31,11 @@ CONF_BURNER_STATE_ENTITY: Final = "burner_state_entity"
 #: string alone cannot say whether a burn is space heating or hot water - only
 #: knowing which circuit the sensor belongs to can.
 CONF_BURNER_CIRCUIT: Final = "burner_circuit"
-CONF_SUPPLY_TEMP_ENTITY: Final = "supply_temp_entity"
+#: NOTE: there is deliberately no ``CONF_SUPPLY_TEMP_ENTITY``. One existed until
+#: V0.4 and was removed: both flows collected it and persisted it, but nothing ever
+#: read it - the supply temperature comes from the boiler climate entity's own
+#: ``temperature`` attribute. A configuration key that silently does nothing is
+#: worse than a missing one, because the user believes they configured something.
 CONF_RETURN_TEMP_ENTITY: Final = "return_temp_entity"
 CONF_ZONES: Final = "zones"
 CONF_WEATHER_CURVE: Final = "weather_curve"

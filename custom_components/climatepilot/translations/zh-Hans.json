@@ -14,7 +14,6 @@
         "data": {
           "boiler_entity": "热源 climate 实体",
           "burner_state_entity": "燃烧器状态传感器（可选）",
-          "supply_temp_entity": "供水温度传感器（可选）",
           "return_temp_entity": "回水温度传感器（可选）",
           "supply_probe_entity": "外贴供水管探头（可选）"
         }
@@ -142,7 +141,6 @@
         "data": {
           "boiler_entity": "热源 climate 实体",
           "burner_state_entity": "燃烧器状态传感器（可选）",
-          "supply_temp_entity": "供水温度传感器（可选）",
           "return_temp_entity": "回水温度传感器（可选）",
           "outdoor_temperature_entity": "室外温度传感器（可选）",
           "outdoor_stale_minutes": "读数过期判定（分钟）",

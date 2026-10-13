@@ -45,7 +45,6 @@ from .const import (
     CONF_SHORT_CYCLE_SECONDS,
     CONF_STARTUP_GRACE,
     CONF_SUPPLY_PROBE_ENTITY,
-    CONF_SUPPLY_TEMP_ENTITY,
     CONF_VERIFY_HEATING_ONLY,
     CONF_VERIFY_MIN_FLOW,
     CONF_VERIFY_SUPPLY_TEMP,
@@ -157,9 +156,14 @@ VERIFY_KEYS: Final = (
 #: strap-on supply probe belongs here too: both flows persist exactly this tuple,
 #: and ``test_translations_sync`` derives the expected label set from it, so a new
 #: role cannot be added to the form without its translation following.
+#:
+#: Every role listed here is consumed at runtime. ``CONF_SUPPLY_TEMP_ENTITY``
+#: used to be in this tuple and was removed: it was collected and persisted but
+#: nothing ever read it, because the supply temperature comes from the boiler
+#: climate entity's own ``temperature`` attribute. A field that accepts a value
+#: and silently ignores it invites the user to believe they configured something.
 BOILER_SENSOR_KEYS: Final = (
     CONF_BURNER_STATE_ENTITY,
-    CONF_SUPPLY_TEMP_ENTITY,
     CONF_RETURN_TEMP_ENTITY,
     CONF_SUPPLY_PROBE_ENTITY,
 )
