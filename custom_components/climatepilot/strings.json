@@ -275,7 +275,8 @@
       "supply_temperature_override": {"name": "Manual supply temperature"}
     },
     "switch": {
-      "auxiliary_load": {"name": "Auxiliary heat load"}
+      "auxiliary_load": {"name": "Auxiliary heat load"},
+      "heating_season": {"name": "Heating season"}
     },
     "climate": {
       "system_thermostat": {"name": "Whole-home heating"}

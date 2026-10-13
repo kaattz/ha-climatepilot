@@ -421,6 +421,9 @@
     "switch": {
       "auxiliary_load": {
         "name": "辅助热负载"
+      },
+      "heating_season": {
+        "name": "采暖季"
       }
     },
     "climate": {
