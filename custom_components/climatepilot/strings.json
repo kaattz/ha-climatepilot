@@ -88,7 +88,8 @@
           "strategies": "Temperature strategies and schedules",
           "heat_source": "Heat source and weather compensation",
           "probes": "External probes and delta-T diagnosis",
-          "diagnostics": "Diagnostics and recovery"
+          "diagnostics": "Diagnostics and recovery",
+          "energy": "Gas usage and degree-days"
         }
       },
       "zones": {
@@ -154,6 +155,14 @@
           "verify_set_hvac_mode_heating_only": "Confirmed: turning heating off does not affect DHW",
           "verify_set_temperature_is_supply": "Confirmed: the setpoint is the heating supply temperature",
           "verify_min_flow_hydraulics": "Confirmed: hydraulics signed off"
+        }
+      },
+      "energy": {
+        "title": "Gas usage and degree-days",
+        "description": "Optional. Point this at your gas meter to record consumption and heating degree-days. The meter is usually WHOLE-HOUSE: it also covers domestic hot water and cooking, so the figures include gas the boiler never used - and 'per degree-day' is a figure to compare over time, NOT a heating efficiency. Degree-days measure how cold the period was, so they make months with different weather comparable. Leave the meter empty to switch the whole feature off.",
+        "data": {
+          "gas_meter_entity": "Gas meter (optional, m\u00b3)",
+          "degree_day_base_c": "Degree-day base temperature"
         }
       },
       "probes": {

@@ -32,9 +32,11 @@ from .const import (
     CONF_BURNER_STATE_ENTITY,
     CONF_CONDENSING_RETURN_C,
     CONF_CONTROL_MODE,
+    CONF_DEGREE_DAY_BASE_C,
     CONF_DELTA_T_HEALTHY_MAX,
     CONF_DELTA_T_HEALTHY_MIN,
     CONF_DELTA_T_WINDOW_SECONDS,
+    CONF_GAS_METER_ENTITY,
     CONF_OUTDOOR_STALE_MINUTES,
     CONF_OUTDOOR_TEMP_ENTITY,
     CONF_PERIODIC_AUDIT,
@@ -69,6 +71,7 @@ from .const import (
     CONF_ZONES,
     CONTROL_MODES,
     DEFAULT_CONDENSING_RETURN_C,
+    DEFAULT_DEGREE_DAY_BASE_C,
     DEFAULT_DELTA_T_HEALTHY_MAX,
     DEFAULT_DELTA_T_HEALTHY_MIN,
     DEFAULT_DELTA_T_WINDOW,
@@ -112,6 +115,7 @@ STEP_SCHEDULE: Final = "schedule"
 STEP_HEAT_SOURCE: Final = "heat_source"
 STEP_PROBES: Final = "probes"
 STEP_DIAGNOSTICS: Final = "diagnostics"
+STEP_ENERGY: Final = "energy"
 
 MENU_OPTIONS: Final = [
     STEP_ZONES,
@@ -119,6 +123,7 @@ MENU_OPTIONS: Final = [
     STEP_HEAT_SOURCE,
     STEP_PROBES,
     STEP_DIAGNOSTICS,
+    STEP_ENERGY,
 ]
 ZONE_MENU_OPTIONS: Final = [STEP_ZONE_DETAIL, STEP_SCHEDULE]
 
@@ -218,6 +223,13 @@ GRACE_LOW: Final = 0
 GRACE_HIGH: Final = 3600
 AUDIT_LOW: Final = 60
 AUDIT_HIGH: Final = 86400
+
+# Bounds for the degree-day base temperature. Outside this window the figure stops
+# describing heating: too low ignores most of the season, too high accrues all
+# summer and dilutes the ratio with cooling-season gas that has nothing to do with
+# the boiler.
+DEGREE_DAY_BASE_LOW: Final = 10.0
+DEGREE_DAY_BASE_HIGH: Final = 25.0
 
 # V0.3 probe / delta-T thresholds. Same contract as the bounds above: these are
 # *input* guards so the form cannot store a nonsense value; the engines remain
@@ -809,6 +821,35 @@ def diagnostics_schema(config: Mapping[str, Any]) -> vol.Schema:
     return vol.Schema({short_cycle: short_cycle_field, grace: grace_field, audit: audit_field})
 
 
+def energy_schema(config: Mapping[str, Any]) -> vol.Schema:
+    """Gas metering and degree-day settings.
+
+    Two fields, both optional in effect. An empty gas meter switches the whole
+    feature off - no entities are created and no state is read - so a system
+    without a meter is unaffected by its existence.
+
+    "Empty" means ``None``, which is what the entity picker submits when nothing
+    is selected. An empty string is rejected, exactly as it is for the six other
+    optional entity fields in this integration; the UI never produces one, and
+    special-casing it here would make this field behave unlike the rest.
+    """
+    gas_meter, gas_meter_field = _optional_entity_field(
+        CONF_GAS_METER_ENTITY,
+        config.get(CONF_GAS_METER_ENTITY),
+        sensor_selector(),
+    )
+    base, base_field = number_field(
+        CONF_DEGREE_DAY_BASE_C,
+        config.get(CONF_DEGREE_DAY_BASE_C),
+        default=float(DEFAULT_DEGREE_DAY_BASE_C),
+        minimum=DEGREE_DAY_BASE_LOW,
+        maximum=DEGREE_DAY_BASE_HIGH,
+        step=0.1,
+        unit="\u00b0C",
+    )
+    return vol.Schema({gas_meter: gas_meter_field, base: base_field})
+
+
 # ---------------------------------------------------------------------------
 # Options flow
 # ---------------------------------------------------------------------------
@@ -1167,6 +1208,26 @@ class ClimatePilotOptionsFlow(OptionsFlowWithReload):
         return self.async_show_form(
             step_id=STEP_DIAGNOSTICS, data_schema=diagnostics_schema(config)
         )
+
+    # -- energy ---------------------------------------------------------
+    async def async_step_energy(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Edit the gas meter and the degree-day base temperature.
+
+        Clearing the meter stores ``None`` rather than an empty string, so the
+        coordinator has one unambiguous "off" value to test. The schema rejects
+        ``""`` before this runs, matching the other optional entity fields.
+        """
+        config = self.config
+
+        if user_input is not None:
+            meter = user_input.get(CONF_GAS_METER_ENTITY)
+            config[CONF_GAS_METER_ENTITY] = str(meter) if meter else None
+            config[CONF_DEGREE_DAY_BASE_C] = float(
+                user_input.get(CONF_DEGREE_DAY_BASE_C, DEFAULT_DEGREE_DAY_BASE_C)
+            )
+            return self._save()
+
+        return self.async_show_form(step_id=STEP_ENERGY, data_schema=energy_schema(config))
 
 
 __all__ = [

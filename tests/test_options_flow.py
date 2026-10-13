@@ -210,6 +210,7 @@ def test_init_shows_every_top_level_menu() -> None:
         of.STEP_HEAT_SOURCE,
         of.STEP_PROBES,
         of.STEP_DIAGNOSTICS,
+        of.STEP_ENERGY,
     }
 
 

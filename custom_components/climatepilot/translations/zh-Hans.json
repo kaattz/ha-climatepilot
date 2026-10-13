@@ -88,7 +88,8 @@
           "strategies": "温度策略与日程",
           "heat_source": "热源与天气补偿",
           "probes": "外贴探头与 ΔT 诊断",
-          "diagnostics": "诊断与恢复"
+          "diagnostics": "诊断与恢复",
+          "energy": "燃气用量与度日数"
         }
       },
       "zones": {
@@ -154,6 +155,14 @@
           "verify_set_hvac_mode_heating_only": "已确认：关闭采暖不影响生活热水",
           "verify_set_temperature_is_supply": "已确认：设置温度是采暖供水温度",
           "verify_min_flow_hydraulics": "已确认：水力条件已验收"
+        }
+      },
+      "energy": {
+        "title": "燃气用量与度日数",
+        "description": "可选。指向你的燃气表即可记录用气量与采暖度日数。注意：这块表通常是【全屋】的 —— 生活热水与做饭也走同一块表，所以数字里包含锅炉并未使用的燃气；而「每度日用气量」是用于【纵向比较】的指标，不是采暖效率。度日数用来衡量这段时期有多冷，从而让天气不同的两个月份可以比较。留空即完全关闭此功能。",
+        "data": {
+          "gas_meter_entity": "燃气表（可选，m\u00b3）",
+          "degree_day_base_c": "度日基准温度"
         }
       },
       "probes": {
