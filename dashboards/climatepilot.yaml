@@ -56,41 +56,49 @@ views:
           # degraded). Its attributes carry the heat-source decision and the
           # reason codes behind it.
           - type: tile
-            entity: sensor.wo_de_jia_heating_state
+            entity: sensor.cp_heating_state
             name: 采暖状态
 
           # The whole-home thermostat. It is a *summary* of every zone, not a
           # proxy for any single one, which is why it sits here rather than
           # under a room.
           - type: tile
-            entity: climate.wo_de_jia_whole_home_heating
+            entity: climate.cp_system_thermostat
             name: 全屋采暖总览
+
+          # The heating season gate. Off = paused: the integration withdraws its
+          # own heat request and writes nothing. On = observe: it resumes
+          # advising, still without writing. It never selects coordinate, so
+          # flipping it cannot start real control by itself.
+          - type: tile
+            entity: switch.cp_heating_season
+            name: 采暖季
 
           # Control mode is the one writable system-level setting: observe
           # writes nothing, coordinate writes zone targets and the boiler.
           - type: tile
-            entity: select.wo_de_jia_control_mode
+            entity: select.cp_control_mode
             name: 控制模式
 
           # Zones with a *real* demand - a thermostat reporting "heating",
           # not merely sitting in heat mode.
           - type: tile
-            entity: sensor.wo_de_jia_zones_demanding_heat
+            entity: sensor.cp_active_zones
             name: 需求分区数
 
           # Weather-compensation result. In observe mode this is advice only,
           # and the entity's `should_apply` attribute says whether it was
           # written to the boiler.
           - type: tile
-            entity: sensor.wo_de_jia_suggested_supply_temperature
+            entity: sensor.cp_suggested_supply_temp
             name: 建议供水温度
 
           - type: tile
-            entity: sensor.wo_de_jia_supply_temperature
+            entity: sensor.cp_supply_temperature
             name: 实际供水温度
 
           - type: tile
-            entity: sensor.wo_de_jia_outdoor_temperature
+            entity: sensor.cp_outdoor_temperature
             name: 室外温度
 
       # ------------------------------------------------------------------
@@ -108,17 +116,17 @@ views:
           # time, e.g. "living_room+master_bedroom". `none` means no zone asked
           # for heat at all - a measurement, not a missing value.
           - type: tile
-            entity: sensor.wo_de_jia_dominant_zone_combination
+            entity: sensor.cp_dominant_zone_combination
             name: 主导组合
 
           - type: tile
-            entity: sensor.wo_de_jia_distinct_zone_combinations_24_h
+            entity: sensor.cp_combinations_24h
             name: 组合种类数
 
           # State is accumulated demand time (seconds); the full breakdown
           # per combination sits in its attributes.
           - type: tile
-            entity: sensor.wo_de_jia_zone_combination_breakdown_24_h
+            entity: sensor.cp_zone_combination_count
             name: 有需求总时长
 
           # Attribute view: the whole CombinationReport, including the share
@@ -129,23 +137,23 @@ views:
             show_header_toggle: false
             entities:
               - type: attribute
-                entity: sensor.wo_de_jia_zone_combination_breakdown_24_h
+                entity: sensor.cp_zone_combination_count
                 attribute: dominant_share
                 name: 主导组合占比
               - type: attribute
-                entity: sensor.wo_de_jia_zone_combination_breakdown_24_h
+                entity: sensor.cp_zone_combination_count
                 attribute: has_dominant_mode
                 name: 是否构成稳定模式
               - type: attribute
-                entity: sensor.wo_de_jia_zone_combination_breakdown_24_h
+                entity: sensor.cp_zone_combination_count
                 attribute: current_key
                 name: 当前组合
               - type: attribute
-                entity: sensor.wo_de_jia_zone_combination_breakdown_24_h
+                entity: sensor.cp_zone_combination_count
                 attribute: total_demand_minutes
                 name: 有需求总时长 (分钟)
               - type: attribute
-                entity: sensor.wo_de_jia_dominant_zone_combination
+                entity: sensor.cp_dominant_zone_combination
                 attribute: dominant_threshold
                 name: 主导判定阈值
 
@@ -164,11 +172,11 @@ views:
           # water is graded separately and never drags this down, so a shower
           # cannot make the floor heating look like short cycling.
           - type: tile
-            entity: sensor.wo_de_jia_combustion_quality
+            entity: sensor.cp_cycling_quality
             name: 采暖燃烧质量
 
           - type: tile
-            entity: sensor.wo_de_jia_burner_starts_24_h
+            entity: sensor.cp_burner_starts_24h
             name: 24 小时点火次数
 
           # Ignitions with no zone demanding heat: the signal that the boiler
@@ -176,19 +184,19 @@ views:
           # DHW, a stray schedule). Unavailable when the burner reading is not
           # trustworthy - "blind" is not "zero".
           - type: tile
-            entity: sensor.wo_de_jia_unexplained_burner_starts_24_h
+            entity: sensor.cp_unexplained_burns_24h
             name: 无需求点火 (24h)
 
           - type: tile
-            entity: sensor.wo_de_jia_last_burn_duration
+            entity: sensor.cp_last_burn_duration
             name: 最近燃烧时长
 
           - type: tile
-            entity: binary_sensor.wo_de_jia_short_cycle_alert
+            entity: binary_sensor.cp_short_cycle_alert
             name: 短循环告警
 
           - type: tile
-            entity: binary_sensor.wo_de_jia_degraded_operation
+            entity: binary_sensor.cp_degraded
             name: 受限运行
 
           - type: entities
@@ -196,19 +204,19 @@ views:
             show_header_toggle: false
             entities:
               - type: attribute
-                entity: sensor.wo_de_jia_combustion_quality
+                entity: sensor.cp_cycling_quality
                 attribute: reason
                 name: 判定依据
               - type: attribute
-                entity: sensor.wo_de_jia_combustion_quality
+                entity: sensor.cp_cycling_quality
                 attribute: grade_heating_24h
                 name: 采暖燃烧分级
               - type: attribute
-                entity: sensor.wo_de_jia_combustion_quality
+                entity: sensor.cp_cycling_quality
                 attribute: grade_dhw_24h
                 name: 生活热水分级
               - type: attribute
-                entity: sensor.wo_de_jia_unexplained_burner_starts_24_h
+                entity: sensor.cp_unexplained_burns_24h
                 attribute: demand_active
                 name: 当前是否有需求
 
@@ -235,41 +243,41 @@ views:
           # The strap-on return probe. `unknown` = no usable probe (not fitted,
           # stale, frozen, or the DS18B20 85 °C sentinel value).
           - type: tile
-            entity: sensor.wo_de_jia_return_temperature
+            entity: sensor.cp_return_temperature
             name: 回水温度 (外贴)
 
           # Supply - return. Indirect flow/condensing indicator, never power.
           - type: tile
-            entity: sensor.wo_de_jia_delta_t
+            entity: sensor.cp_delta_t
             name: 供回水温差 ΔT
 
           # Worst of the two probe qualities: valid / stale / implausible /
           # frozen / unavailable.
           - type: tile
-            entity: sensor.wo_de_jia_delta_t_quality
+            entity: sensor.cp_delta_t_quality
             name: 探头质量
 
           # A configured probe that became unusable. Off when nothing is
           # fitted - an absent probe is not a fault.
           - type: tile
-            entity: binary_sensor.wo_de_jia_probe_fault
+            entity: binary_sensor.cp_probe_fault
             name: 探头故障
 
           # Indirect condensing indicator from the return temperature.
           - type: tile
-            entity: sensor.wo_de_jia_condensing_regime
+            entity: sensor.cp_condensing_regime
             name: 冷凝工况
 
           # Hydraulic signal from the settled ΔT: low ΔT usually means excessive
           # flow or a bypass short-circuit; high ΔT means insufficient flow.
           # Both are flow signals, not "efficiency scores".
           - type: tile
-            entity: sensor.wo_de_jia_hydraulic_verdict
+            entity: sensor.cp_hydraulic_verdict
             name: 水力判定
 
           # Advisory only - the weather curve is never changed automatically.
           - type: tile
-            entity: sensor.wo_de_jia_curve_calibration_advice
+            entity: sensor.cp_curve_calibration_advice
             name: 曲线校准建议
 
           - type: entities
@@ -277,47 +285,47 @@ views:
             show_header_toggle: false
             entities:
               - type: attribute
-                entity: sensor.wo_de_jia_delta_t
+                entity: sensor.cp_delta_t
                 attribute: average
                 name: 窗口平均 ΔT
               - type: attribute
-                entity: sensor.wo_de_jia_delta_t
+                entity: sensor.cp_delta_t
                 attribute: minimum
                 name: 窗口最小 ΔT
               - type: attribute
-                entity: sensor.wo_de_jia_delta_t
+                entity: sensor.cp_delta_t
                 attribute: maximum
                 name: 窗口最大 ΔT
               - type: attribute
-                entity: sensor.wo_de_jia_delta_t
+                entity: sensor.cp_delta_t
                 attribute: trend_per_hour
                 name: ΔT 趋势 (每小时)
               - type: attribute
-                entity: sensor.wo_de_jia_delta_t
+                entity: sensor.cp_delta_t
                 attribute: stable_seconds
                 name: 已稳定时长 (秒)
               - type: attribute
-                entity: sensor.wo_de_jia_delta_t
+                entity: sensor.cp_delta_t
                 attribute: samples
                 name: 样本数
               - type: attribute
-                entity: sensor.wo_de_jia_delta_t
+                entity: sensor.cp_delta_t
                 attribute: is_power_measurement
                 name: 是否热功率 (恒为 false)
               - type: attribute
-                entity: sensor.wo_de_jia_delta_t_quality
+                entity: sensor.cp_delta_t_quality
                 attribute: divergence
                 name: 供回探头偏差
               - type: attribute
-                entity: sensor.wo_de_jia_delta_t_quality
+                entity: sensor.cp_delta_t_quality
                 attribute: reason_codes
                 name: 原因码
               - type: attribute
-                entity: sensor.wo_de_jia_curve_calibration_advice
+                entity: sensor.cp_curve_calibration_advice
                 attribute: advisory_only
                 name: 仅建议 (不自动改)
               - type: attribute
-                entity: binary_sensor.wo_de_jia_probe_fault
+                entity: binary_sensor.cp_probe_fault
                 attribute: affects_heating
                 name: 是否影响采暖 (恒为 false)
 
@@ -341,63 +349,63 @@ views:
           # The single arbitrated target. Its attributes explain it: base
           # value, winning source, adjustment delta, clamp, reason codes.
           - type: tile
-            entity: sensor.ke_ting_di_nuan_effective_setpoint
+            entity: sensor.cp_living_room_effective_setpoint
             name: 有效目标
             features:
               - type: target-temperature
                 entity: climate.livingroom_floorheating
 
           - type: tile
-            entity: sensor.ke_ting_di_nuan_setpoint_source
+            entity: sensor.cp_living_room_setpoint_source
             name: 目标来源
 
           - type: tile
-            entity: sensor.ke_ting_di_nuan_room_temperature
+            entity: sensor.cp_living_room_zone_temperature
             name: 房间温度
 
           - type: tile
-            entity: binary_sensor.ke_ting_di_nuan_heat_request
+            entity: binary_sensor.cp_living_room_heat_request
             name: 正在要热
 
           # Comfort verdict: ok / overheating / underheating / unknown. Reads
           # "unknown" (not "ok") until the analyser has samples for the room.
           - type: tile
-            entity: sensor.ke_ting_di_nuan_comfort_verdict
+            entity: sensor.cp_living_room_comfort_verdict
             name: 舒适判定
 
           # The actionable code behind the verdict. Attribute `reason_codes`
           # lists what the engine saw; see docs/DEPLOYMENT.md 7.4 for how to act
           # on each code.
           - type: tile
-            entity: sensor.ke_ting_di_nuan_comfort_advice
+            entity: sensor.cp_living_room_comfort_advice
             name: 处置建议
 
           - type: tile
-            entity: binary_sensor.ke_ting_di_nuan_overheating
+            entity: binary_sensor.cp_living_room_overheating
             name: 持续过热
 
           - type: tile
-            entity: binary_sensor.ke_ting_di_nuan_underheating
+            entity: binary_sensor.cp_living_room_underheating
             name: 持续欠温
 
           - type: tile
-            entity: binary_sensor.ke_ting_di_nuan_manual_override_active
+            entity: binary_sensor.cp_living_room_manual_override
             name: 手动覆盖中
 
           - type: tile
-            entity: sensor.ke_ting_di_nuan_manual_override_remaining
+            entity: sensor.cp_living_room_override_remaining
             name: 覆盖剩余
 
           - type: tile
-            entity: select.ke_ting_di_nuan_room_mode
+            entity: select.cp_living_room_zone_mode
             name: 房间模式
 
           - type: tile
-            entity: switch.ke_ting_di_nuan_auxiliary_heat_load
+            entity: switch.cp_living_room_auxiliary_load
             name: 可作辅助负载
 
           - type: tile
-            entity: button.ke_ting_di_nuan_resume_automatic
+            entity: button.cp_living_room_resume_auto
             name: 恢复自动
 
           # ---- Room 2: 主卧地暖 ------------------------------------------
@@ -409,58 +417,58 @@ views:
             icon: mdi:bed
 
           - type: tile
-            entity: sensor.zhu_wo_di_nuan_effective_setpoint
+            entity: sensor.cp_master_bedroom_effective_setpoint
             name: 有效目标
             features:
               - type: target-temperature
                 entity: climate.master_bedroom_floorheating
 
           - type: tile
-            entity: sensor.zhu_wo_di_nuan_setpoint_source
+            entity: sensor.cp_master_bedroom_setpoint_source
             name: 目标来源
 
           - type: tile
-            entity: sensor.zhu_wo_di_nuan_room_temperature
+            entity: sensor.cp_master_bedroom_zone_temperature
             name: 房间温度
 
           - type: tile
-            entity: binary_sensor.zhu_wo_di_nuan_heat_request
+            entity: binary_sensor.cp_master_bedroom_heat_request
             name: 正在要热
 
           - type: tile
-            entity: sensor.zhu_wo_di_nuan_comfort_verdict
+            entity: sensor.cp_master_bedroom_comfort_verdict
             name: 舒适判定
 
           - type: tile
-            entity: sensor.zhu_wo_di_nuan_comfort_advice
+            entity: sensor.cp_master_bedroom_comfort_advice
             name: 处置建议
 
           - type: tile
-            entity: binary_sensor.zhu_wo_di_nuan_overheating
+            entity: binary_sensor.cp_master_bedroom_overheating
             name: 持续过热
 
           - type: tile
-            entity: binary_sensor.zhu_wo_di_nuan_underheating
+            entity: binary_sensor.cp_master_bedroom_underheating
             name: 持续欠温
 
           - type: tile
-            entity: binary_sensor.zhu_wo_di_nuan_manual_override_active
+            entity: binary_sensor.cp_master_bedroom_manual_override
             name: 手动覆盖中
 
           - type: tile
-            entity: sensor.zhu_wo_di_nuan_manual_override_remaining
+            entity: sensor.cp_master_bedroom_override_remaining
             name: 覆盖剩余
 
           - type: tile
-            entity: select.zhu_wo_di_nuan_room_mode
+            entity: select.cp_master_bedroom_zone_mode
             name: 房间模式
 
           - type: tile
-            entity: switch.zhu_wo_di_nuan_auxiliary_heat_load
+            entity: switch.cp_master_bedroom_auxiliary_load
             name: 可作辅助负载
 
           - type: tile
-            entity: button.zhu_wo_di_nuan_resume_automatic
+            entity: button.cp_master_bedroom_resume_auto
             name: 恢复自动
 
           # ---- Cross-room actions ----------------------------------------
@@ -470,11 +478,11 @@ views:
             icon: mdi:cog
 
           - type: tile
-            entity: button.wo_de_jia_reassess_now
+            entity: button.cp_reassess
             name: 立即重新评估
 
           - type: tile
-            entity: number.wo_de_jia_manual_supply_temperature
+            entity: number.cp_supply_temperature_override
             name: 手动设定供水温度
 
           # A plain-language summary for the person who does not want to read
@@ -483,9 +491,9 @@ views:
           - type: markdown
             text_only: true
             content: >-
-              **{{ states('sensor.wo_de_jia_heating_state') }}**
-              ｜需求 {{ states('sensor.wo_de_jia_zones_demanding_heat') }} 个分区
-              ｜主导组合 {{ states('sensor.wo_de_jia_dominant_zone_combination') }}
-              占比 {{ state_attr('sensor.wo_de_jia_dominant_zone_combination', 'dominant_share') }}
-              ｜采暖燃烧 {{ states('sensor.wo_de_jia_combustion_quality') }}
-              ｜无需求点火 {{ states('sensor.wo_de_jia_unexplained_burner_starts_24_h') }}
+              **{{ states('sensor.cp_heating_state') }}**
+              ｜需求 {{ states('sensor.cp_active_zones') }} 个分区
+              ｜主导组合 {{ states('sensor.cp_dominant_zone_combination') }}
+              占比 {{ state_attr('sensor.cp_dominant_zone_combination', 'dominant_share') }}
+              ｜采暖燃烧 {{ states('sensor.cp_cycling_quality') }}
+              ｜无需求点火 {{ states('sensor.cp_unexplained_burns_24h') }}

@@ -61,9 +61,7 @@ def test_opening_the_season_never_selects_coordinate() -> None:
         (CONTROL_MODE_COORDINATE, True),
     ],
 )
-def test_control_mode_maps_back_to_the_switch_state(
-    mode: str, expected_on: bool
-) -> None:
+def test_control_mode_maps_back_to_the_switch_state(mode: str, expected_on: bool) -> None:
     from custom_components.climatepilot.switch import control_mode_to_season
 
     assert control_mode_to_season(mode) is expected_on

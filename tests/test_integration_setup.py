@@ -71,7 +71,7 @@ EXPECTED_PER_PLATFORM = {
     "select": (1, 1),
     "button": (1, 1),
     "number": (1, 0),
-    "switch": (0, 1),
+    "switch": (1, 1),
     "climate": (1, 0),
 }
 #: System-level entity counts as each release shipped them, kept as a *record*
@@ -97,11 +97,19 @@ V02_ENTITY_TOTAL = 44
 #: recorded V0.2 baseline, so they stay correct as later releases add more.
 V03_SYSTEM_SENSORS = 18
 V03_SYSTEM_BINARY = 3
+V03_ENTITY_TOTAL = 51
+
+#: V0.4 adds exactly one system-level entity and renames every id: the
+#: heating-season switch (``switch.cp_heating_season``). Entity *count* is
+#: unchanged otherwise - the release renames the existing 51 ids from the
+#: pinyin ``wo_de_jia_`` prefix to the pinned ``cp_`` one.
+V04_SYSTEM_SWITCH = 1
 
 V02_ADDED = (V02_SYSTEM_SENSORS - V01_SYSTEM_SENSORS) + ZONE_COUNT * (
     (EXPECTED_PER_PLATFORM["sensor"][1] - 4) + (EXPECTED_PER_PLATFORM["binary_sensor"][1] - 2)
 )
 V03_ADDED = (V03_SYSTEM_SENSORS - V02_SYSTEM_SENSORS) + (V03_SYSTEM_BINARY - V02_SYSTEM_BINARY)
+V04_ADDED = V04_SYSTEM_SWITCH
 EXPECTED_ENTITY_TOTAL = sum(
     system + ZONE_COUNT * per_zone for system, per_zone in EXPECTED_PER_PLATFORM.values()
 )
@@ -364,36 +372,51 @@ async def test_expected_entities_are_registered(hass):
     await setup_entry(hass)
     ids = registered_entities(hass)
 
-    # Assert on translation keys via unique_id, because the entity_id slug is
-    # derived from the *translated* device name and is not a stable contract.
+    # The entity_id prefix is now pinned in code rather than derived from the
+    # device name, so unlike before it *is* a stable contract and can be
+    # asserted directly. Before V0.4 the slug came from the translated device
+    # name ("我的家" -> wo_de_jia), which is why only suffixes were checked.
+    assert all(eid.split(".", 1)[1].startswith("cp_") for eid in ids), (
+        f"every entity id must use the pinned cp_ prefix, got {sorted(ids)}"
+    )
+
     suffixes = {eid.split(".", 1)[1] for eid in ids}
     assert len(ids) == EXPECTED_ENTITY_TOTAL, (
         f"expected {EXPECTED_ENTITY_TOTAL} entities for {ZONE_COUNT} zones "
         f"(V0.1's {V01_ENTITY_TOTAL} + {V02_ADDED} V0.2 additions + "
-        f"{V03_ADDED} V0.3 additions), "
+        f"{V03_ADDED} V0.3 additions + {V04_ADDED} V0.4 addition), "
         f"got {len(ids)}: {sorted(ids)}"
     )
-    assert EXPECTED_ENTITY_TOTAL == V01_ENTITY_TOTAL + V02_ADDED + V03_ADDED
+    assert EXPECTED_ENTITY_TOTAL == V01_ENTITY_TOTAL + V02_ADDED + V03_ADDED + V04_ADDED
     # The V0.3 delta is system-level only, so it must not scale with room count.
     assert V03_ADDED == 7
     assert V01_ENTITY_TOTAL + V02_ADDED == V02_ENTITY_TOTAL
+    assert V01_ENTITY_TOTAL + V02_ADDED + V03_ADDED == V03_ENTITY_TOTAL
+    # V0.4 adds one switch and nothing else; its whole point is the rename.
+    assert V04_ADDED == 1
+    assert EXPECTED_PER_PLATFORM["switch"][0] == V04_SYSTEM_SWITCH
     # The recorded baselines must agree with the live inventory they describe.
     assert EXPECTED_PER_PLATFORM["sensor"][0] == V03_SYSTEM_SENSORS
     assert EXPECTED_PER_PLATFORM["binary_sensor"][0] == V03_SYSTEM_BINARY
 
+    # Names are the entity's internal key (V0.4), not the translated English
+    # name as before. That is deliberate: the translated name depends on the
+    # backend language, so an id built from it would change if the language
+    # changed, while the key is a code constant.
     for suffix in (
         "control_mode",
         "heating_state",
-        "zones_demanding_heat",
-        "suggested_supply_temperature",
+        "active_zones",
+        "suggested_supply_temp",
         "outdoor_temperature",
         "supply_temperature",
-        "burner_starts_24_h",
+        "burner_starts_24h",
         "last_burn_duration",
         "short_cycle_alert",
-        "degraded_operation",
-        "reassess_now",
-        "manual_supply_temperature",
+        "degraded",
+        "reassess",
+        "supply_temperature_override",
+        "heating_season",
     ):
         assert any(name.endswith(suffix) for name in suffixes), f"missing {suffix}"
 
@@ -401,13 +424,13 @@ async def test_expected_entities_are_registered(hass):
     for suffix in (
         "effective_setpoint",
         "setpoint_source",
-        "room_temperature",
-        "manual_override_remaining",
-        "manual_override_active",
+        "zone_temperature",
+        "override_remaining",
+        "manual_override",
         "heat_request",
-        "resume_automatic",
-        "auxiliary_heat_load",
-        "room_mode",
+        "resume_auto",
+        "auxiliary_load",
+        "zone_mode",
     ):
         matches = [name for name in suffixes if name.endswith(suffix)]
         assert len(matches) == 2, f"{suffix}: expected 2, got {matches}"
@@ -417,9 +440,8 @@ async def test_v02_entities_are_registered(hass):
     """The V0.2 additions must reach the real entity registry.
 
     Checked by entity_id suffix rather than by unique_id because this is the
-    layer that exercises Home Assistant's own naming: the suffix is slugified
-    from the *English* name (see ``test_dashboard_entity_ids_exist_in_the_registry``
-    for why), so a translation that loses a key shows up here as a missing
+    layer that exercises Home Assistant's own naming: since V0.4 that name is the
+    entity's internal key, so a key renamed in code shows up here as a missing
     entity rather than as a blank card later.
     """
     await setup_entry(hass)
@@ -427,10 +449,10 @@ async def test_v02_entities_are_registered(hass):
 
     for suffix in (
         "dominant_zone_combination",
-        "distinct_zone_combinations_24_h",
-        "zone_combination_breakdown_24_h",
-        "combustion_quality",
-        "unexplained_burner_starts_24_h",
+        "combinations_24h",
+        "zone_combination_count",
+        "cycling_quality",
+        "unexplained_burns_24h",
     ):
         assert any(name.endswith(suffix) for name in suffixes), f"missing {suffix}"
 
@@ -496,12 +518,13 @@ async def test_dashboard_entity_ids_exist_in_the_registry(hass):
     unused = sorted(real - referenced)
     assert not unused, f"registered entities missing from the dashboard: {unused}"
 
-    # Sanity-check the fixture itself: the reference install derives ids from the
-    # configured system name ("我的家" -> "wo_de_jia") and room names.
-    assert all(
-        eid.split(".", 1)[1].startswith(("wo_de_jia", "ke_ting_di_nuan", "zhu_wo_di_nuan"))
-        for eid in real
-    ), f"unexpected naming scheme in the registry: {sorted(real)}"
+    # Sanity-check the fixture itself: since V0.4 every id is the pinned ASCII
+    # prefix plus the entity's internal key, so a regression to device-name
+    # derivation (which produced pinyin) fails here rather than silently
+    # changing every id in a user's install.
+    assert all(eid.split(".", 1)[1].startswith("cp_") for eid in real), (
+        f"unexpected naming scheme in the registry: {sorted(real)}"
+    )
 
 
 async def test_registry_entries_have_unique_ids_and_devices(hass):

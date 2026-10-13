@@ -125,7 +125,10 @@ from custom_components.climatepilot.sensor import (
     ZoneCombinationCountSensor,
     ZoneTemperatureSensor,
 )
-from custom_components.climatepilot.switch import AuxiliaryLoadSwitch
+from custom_components.climatepilot.switch import (
+    AuxiliaryLoadSwitch,
+    HeatingSeasonSwitch,
+)
 
 COMPONENT_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "climatepilot"
 DASHBOARD_FILE = Path(__file__).resolve().parents[1] / "dashboards" / "climatepilot.yaml"
@@ -754,7 +757,7 @@ EXPECTED_PER_PLATFORM: dict[str, tuple[int, int]] = {
     "select": (1, 1),
     "button": (1, 1),
     "number": (1, 0),
-    "switch": (0, 1),
+    "switch": (1, 1),
 }
 
 #: Entities one three-zone system must expose in total. Derived, never pinned:
@@ -798,7 +801,7 @@ def build_platform_entities(coordinator: FakeCoordinator) -> dict[str, list]:
         "select": [ControlModeSelect(coordinator)],
         "button": [ReassessButton(coordinator)],
         "number": [SupplyTemperatureOverrideNumber(coordinator)],
-        "switch": [],
+        "switch": [HeatingSeasonSwitch(coordinator)],
     }
     for zone_id in coordinator.zone_ids:
         entities["sensor"].extend(
@@ -971,7 +974,7 @@ def test_expected_translation_key_set() -> None:
     }
     assert keys["button"] == {"resume_auto", "reassess"}
     assert keys["number"] == {"supply_temperature_override"}
-    assert keys["switch"] == {"auxiliary_load"}
+    assert keys["switch"] == {"auxiliary_load", "heating_season"}
 
 
 def test_v02_translation_keys_are_implemented_verbatim() -> None:
@@ -1370,12 +1373,14 @@ def test_v03_entities_appear_once_per_system_not_per_zone() -> None:
 # Dashboard contract
 # ---------------------------------------------------------------------------
 
-#: Device names the shipped dashboard was written for. They are the reference
-#: installation's: the system name from ``tests/test_integration_setup.py`` and
-#: its two rooms. An entity id is ``<slug of device name>_<slug of ENGLISH
-#: entity name>`` - see ``docs/DASHBOARD.md`` section 1.
-DASHBOARD_SYSTEM_DEVICE = "我的家"
-DASHBOARD_ZONE_DEVICES = {"living_room": "客厅地暖", "master_bedroom": "主卧地暖"}
+#: Zone ids the shipped dashboard was written for - the reference
+#: installation's two rooms, by the integration's own ``zone_id``.
+#:
+#: Before V0.4 this held the *Chinese device names* ("客厅地暖"), because the id
+#: was derived from the slugified display name. The ids are now
+#: ``<domain>.cp_<key>`` and ``<domain>.cp_<zone_id>_<key>``, so no display name
+#: participates and none is listed here.
+DASHBOARD_ZONE_IDS = ("living_room", "master_bedroom")
 
 #: The two KNX thermostats are the *user's* entities, created by their KNX
 #: integration - not by ClimatePilot - so they are not derivable from
@@ -1448,38 +1453,40 @@ def dashboard_entity_ids() -> set[str]:
 
 
 def expected_dashboard_ids() -> set[str]:
-    """Derive the ids the dashboard *should* use, by HA's real slug rule.
+    """Derive the ids the dashboard *should* use, under the V0.4 naming rule.
 
-    The subtlety that broke this once: Home Assistant builds an entity id from
-    the localised name only when the UI language is one of the 41 in
-    ``homeassistant.generated.languages.NATIVE_ENTITY_IDS``; **no Chinese variant
-    is in that list**, so a zh-Hans install shows Chinese names but ASCII English
-    ids. Deriving from ``en.json`` is therefore correct even for Chinese users,
-    and deriving from ``zh-Hans.json`` produces plausible-looking ids that do not
-    exist.
+    Since V0.4 the id is the pinned prefix plus the entity's own internal key::
 
-    This helper is a *derivation*, so it can only ever be as right as its rule -
-    and it was wrong for exactly that reason: the first version of the dashboard
-    used ``slugify(<Chinese device name> + <Chinese entity name>)``, and the
-    check that "verified" it re-derived the same ids with the same wrong rule, so
-    it passed while every id was broken. Two sides of a check sharing one
-    assumption proves nothing about the assumption.
+        <domain>.cp_<key>                 system-level
+        <domain>.cp_<zone_id>_<key>       per-zone
 
-    The independent check is
-    ``test_integration_setup.test_dashboard_entity_ids_exist_in_the_registry``,
-    which reads ids out of a booted Home Assistant instead of computing them. If
-    you change the rule here, that test is the one that must still agree.
+    The zone part is the integration's ``zone_id`` (``living_room``), not the
+    Chinese room name, so no localisation is involved at all.
+
+    This replaced an earlier version that derived ids by slugifying the
+    *translated English name* and prefixing the slugified device name. That rule
+    was right for its time, and it was the fix for an even earlier bug where
+    ``slugify(<Chinese device name> + <Chinese entity name>)`` produced ids that
+    looked plausible and did not exist. Note what that history shows: two sides
+    of a check sharing one derivation rule proves nothing about the rule, which
+    is why ``test_integration_setup`` reads the ids out of a booted Home
+    Assistant instead of computing them. That test is the authority; if this
+    derivation ever disagrees with it, this one is wrong.
+
+    A related consequence worth stating, because it motivated the change: an id
+    derived from a translated name depends on the *backend language*, so the same
+    entity would get a different id on a German install. Keys are code constants
+    and do not move.
     """
     names = load_english_entity_names()
     expected: set[str] = set()
     for platform, keys in names.items():
-        for key, name in keys.items():
-            slug = slugify(name)
+        for key in keys:
             if (platform, key) in ZONE_SCOPED_KEYS:
-                for device in DASHBOARD_ZONE_DEVICES.values():
-                    expected.add(f"{platform}.{slugify(device)}_{slug}")
+                for zone_id in DASHBOARD_ZONE_IDS:
+                    expected.add(f"{platform}.cp_{zone_id}_{key}")
             else:
-                expected.add(f"{platform}.{slugify(DASHBOARD_SYSTEM_DEVICE)}_{slug}")
+                expected.add(f"{platform}.cp_{key}")
     return expected
 
 
@@ -1513,13 +1520,19 @@ def test_dashboard_covers_every_translation_key() -> None:
     assert not missing, f"translation keys not shown on the dashboard: {missing}"
 
 
-def test_dashboard_does_not_use_chinese_derived_slugs() -> None:
-    """Guard the specific mistake this suite was fixed for.
+def test_dashboard_ids_cannot_contain_chinese_derived_slugs() -> None:
+    """Guard the mistake this suite was fixed for - now structurally, not by luck.
 
-    Chinese names slugify into something that *looks* like an entity id, so a
-    wrong dashboard is self-consistent as long as the same assumption is used to
-    check it. Two independent signals catch it: no Chinese-derived slug may
-    appear, and the Chinese name must not equal the English one for these keys.
+    The original bug: the dashboard used ``slugify(<Chinese device name> +
+    <Chinese entity name>)``, producing ids that looked plausible and that Home
+    Assistant never creates. The guard used to *compute* the Chinese-derived ids
+    and assert none of them appeared on the dashboard, which worked but depended
+    on reproducing the wrong rule correctly.
+
+    Since V0.4 no display name participates in an id at all: it is
+    ``<domain>.cp_<key>`` with the key being a code constant. So the property is
+    now about the *scheme*, not about a particular set of strings - which also
+    covers room names, the other place pinyin used to leak in (``ke_ting_di_nuan``).
     """
     names_zh = {
         platform: {key: meta["name"] for key, meta in keys.items()}
@@ -1527,26 +1540,39 @@ def test_dashboard_does_not_use_chinese_derived_slugs() -> None:
             (COMPONENT_DIR / "translations" / "zh-Hans.json").read_text(encoding="utf-8")
         )["entity"].items()
     }
-    names_en = load_english_entity_names()
 
-    chinese_derived: set[str] = set()
-    for platform, keys in names_zh.items():
-        for key, name in keys.items():
-            if name == names_en[platform][key]:
-                continue  # same in both languages: cannot distinguish
-            slug = slugify(name)
-            if (platform, key) in ZONE_SCOPED_KEYS:
-                for device in DASHBOARD_ZONE_DEVICES.values():
-                    chinese_derived.add(f"{platform}.{slugify(device)}_{slug}")
-            else:
-                chinese_derived.add(f"{platform}.{slugify(DASHBOARD_SYSTEM_DEVICE)}_{slug}")
-
-    offenders = sorted(dashboard_entity_ids() & chinese_derived)
-    assert not offenders, (
-        f"dashboard uses ids derived from Chinese names, which HA never creates: {offenders}"
+    # Every Chinese display name must slugify to nothing, which is precisely why
+    # an id must never be derived from one. This replaces the old guard's
+    # computed "Chinese-derived ids": the earlier version built them by slugifying
+    # the Chinese device + entity names, but HA's slugify strips CJK entirely, so
+    # what it actually produced was the pinyin of the *device* name joined to an
+    # empty suffix - the check was real but its name described it inaccurately.
+    assert all(
+        not slugify(meta["name"])
+        for keys in names_zh.values()
+        for meta in keys.values()
+        if isinstance(meta, dict)
+    ), (
+        "a Chinese display name unexpectedly slugified to something non-empty; "
+        "if HA starts transliterating CJK, ids derived from names become possible again"
     )
-    # The guard is only meaningful if the two rules really do diverge.
-    assert chinese_derived, "no Chinese-derived ids were computed; the check is vacuous"
+
+    # The property that replaced it: every generated id is cp_ + a code key, so
+    # no display name - Chinese or otherwise - can reach an id.
+    chinese_slugs = {slugify(name) for name in ("客厅地暖", "主卧地暖", "采暖季")}
+    chinese_slugs.discard("")
+    for entity_id in expected_dashboard_ids():
+        object_id = entity_id.split(".", 1)[1]
+        assert object_id.startswith("cp_"), entity_id
+        remainder = object_id[len("cp_") :]
+        for slug in chinese_slugs:
+            assert not remainder.endswith(f"_{slug}") and remainder != slug, (
+                f"{entity_id} contains the slug of a Chinese display name ({slug}); "
+                "ids must not depend on display names"
+            )
+
+    # The dashboard itself must use exactly those ids.
+    assert not (dashboard_entity_ids() - expected_dashboard_ids() - USER_OWNED_ENTITIES)
 
 
 # ---------------------------------------------------------------------------
@@ -2384,7 +2410,10 @@ async def test_platform_setup_adds_expected_entities_per_platform() -> None:
         (select_platform, EXPECTED_PER_PLATFORM["select"][0] + len(coordinator.zone_ids)),
         (button_platform, EXPECTED_PER_PLATFORM["button"][0] + len(coordinator.zone_ids)),
         (number_platform, EXPECTED_PER_PLATFORM["number"][0]),
-        (switch_platform, len(coordinator.zone_ids)),
+        (
+            switch_platform,
+            EXPECTED_PER_PLATFORM["switch"][0] + len(coordinator.zone_ids),
+        ),
     ]
     for module, expected in expectations:
         added: list = []

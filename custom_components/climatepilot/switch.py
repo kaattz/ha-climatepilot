@@ -131,7 +131,5 @@ async def async_setup_entry(
     coordinator: ClimatePilotCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities: list[SwitchEntity] = [HeatingSeasonSwitch(coordinator)]
-    entities.extend(
-        AuxiliaryLoadSwitch(coordinator, zone_id) for zone_id in coordinator.zone_ids
-    )
+    entities.extend(AuxiliaryLoadSwitch(coordinator, zone_id) for zone_id in coordinator.zone_ids)
     async_add_entities(entities)
