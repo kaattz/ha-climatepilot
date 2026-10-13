@@ -78,6 +78,14 @@ CONF_DELTA_T_HEALTHY_MIN: Final = "delta_t_healthy_min"
 CONF_DELTA_T_HEALTHY_MAX: Final = "delta_t_healthy_max"
 CONF_PROBE_MAX_DIVERGENCE: Final = "probe_max_divergence"
 
+# V0.5 gas / degree-day metering keys.
+#
+# ``gas_meter_entity`` is optional and **empty means the feature is off**: no
+# entities are created and no state is read, so a system without a meter pays
+# nothing for it.
+CONF_GAS_METER_ENTITY: Final = "gas_meter_entity"
+CONF_DEGREE_DAY_BASE_C: Final = "degree_day_base_c"
+
 # Device semantics verification (design doc section 6.3 / 14). These are
 # *user attestations* collected in the config flow. They gate every write to
 # the heat source; without them the integration stays in suggest-only mode.
@@ -449,6 +457,37 @@ DEFAULT_SHORT_CYCLE_WINDOW: Final = 24 * 3600.0
 # Recovery
 DEFAULT_STARTUP_GRACE: Final = 120.0  # seconds after start before writes resume
 DEFAULT_PERIODIC_AUDIT: Final = 900.0  # 15 min consistency check (was the blueprint's polling)
+
+# ---------------------------------------------------------------------------
+# Gas / degree-day metering (V0.5)
+# ---------------------------------------------------------------------------
+
+#: Base temperature for heating degree-days, in degrees Celsius. A day whose
+#: mean outdoor temperature sits below this accrues degree-days; above it, none.
+#:
+#: **This is a convention, not a physical constant.** US practice (NOAA) uses
+#: 65 degF = 18.3 C; 15.5 C = 60 degF is the other common choice. Which one is
+#: picked only shifts the absolute value of ``gas_per_degree_day`` - it does not
+#: make the feature right or wrong.
+#:
+#: It is deliberately **separate from the weather curve's** ``outdoor_stop``.
+#: That value exists to shape *control* and a user will retune it; reusing it
+#: here would silently redefine past gas figures, so last year's numbers would
+#: stop being comparable with this year's. What matters is that this value stays
+#: put for a whole heating season.
+DEFAULT_DEGREE_DAY_BASE_C: Final = 15.5
+
+#: Fraction of the elapsed day that must have had a usable outdoor reading
+#: before degree-days are called trustworthy. Below this the figure is still
+#: reported, but flagged - a partly observed day is a real measurement of a
+#: smaller period, and hiding it would be worse than qualifying it.
+ENERGY_COVERAGE_TRUSTED: Final = 0.9
+
+#: Display units. These strings are part of the contract: statistics generation
+#: is suppressed when a unit changes, so they must never vary between samples.
+ENERGY_UNIT_GAS: Final = "m\u00b3"
+ENERGY_UNIT_DEGREE_DAYS: Final = "\u00b0C\u00b7d"
+ENERGY_UNIT_GAS_PER_DEGREE_DAY: Final = "m\u00b3/\u00b0C\u00b7d"
 
 # Storage
 STORAGE_VERSION: Final = 1
