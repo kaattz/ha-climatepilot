@@ -589,3 +589,117 @@ def test_strings_services_match_the_registered_services():
         const.SERVICE_REASSESS,
     }
     assert documented == registered, (documented, registered)
+
+
+def test_services_yaml_exists_and_matches_the_registered_services():
+    """``services.yaml`` must exist and describe exactly the registered services.
+
+    Home Assistant logs ``Failed to load services.yaml for integration: ...`` on
+    every startup when the file is missing, even though the services themselves
+    still register and work. That was a real defect: the integration shipped
+    three services and no ``services.yaml``, so a healthy install produced an
+    ERROR line in the log that looked like a broken integration.
+
+    The file is UI metadata (Developer Tools and automation editors read it),
+    while validation lives in the voluptuous schema in ``__init__.py`` - so the
+    two can drift apart silently. This pins the names; the field lists are
+    checked for matching keys so a renamed service cannot leave a stale
+    description behind.
+    """
+    import yaml
+
+    import custom_components.climatepilot.const as const
+
+    path = COMPONENT / "services.yaml"
+    assert path.is_file(), "services.yaml is missing; Home Assistant logs an error on every startup"
+
+    described = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(described, dict), "services.yaml must be a mapping"
+
+    registered = {
+        const.SERVICE_RESUME_AUTO,
+        const.SERVICE_SET_SUPPLY_TEMPERATURE,
+        const.SERVICE_REASSESS,
+    }
+    assert set(described) == registered, (
+        f"services.yaml describes {sorted(set(described))}, code registers {sorted(registered)}"
+    )
+
+    # Every entry needs the fields HA's UI relies on.
+    for name, spec in described.items():
+        assert isinstance(spec, dict), name
+        assert spec.get("name"), f"{name} has no display name"
+        assert "fields" in spec, f"{name} has no fields key"
+
+
+def test_services_yaml_fields_match_the_registered_schemas():
+    """The documented fields must match the schema's fields.
+
+    A field added to the schema but not documented (or documented after being
+    removed) makes the automation editor suggest inputs the service rejects.
+
+    Schemas reference module-level constants (``vol.Optional(CONF_ZONE_ID)``)
+    rather than literals, so the constants are resolved through their
+    declarations before comparing.
+    """
+    import yaml
+
+    import custom_components.climatepilot.const as const
+
+    source = (COMPONENT / "__init__.py").read_text(encoding="utf-8")
+    described = yaml.safe_load((COMPONENT / "services.yaml").read_text(encoding="utf-8"))
+
+    #: Constant name -> its string value. Schemas reference constants from both
+    #: our own ``const`` module and Home Assistant's (``ATTR_TEMPERATURE``), so
+    #: both namespaces are folded into one lookup.
+    constants = {
+        name: value
+        for name, value in vars(const).items()
+        if name.isupper() and isinstance(value, str)
+    }
+    from homeassistant.const import __dict__ as hass_const
+
+    constants.update(
+        {
+            name: value
+            for name, value in hass_const.items()
+            if name.isupper() and isinstance(value, str)
+        }
+    )
+
+    def resolve(token: str) -> str:
+        """Map a schema token to the actual field name it carries."""
+        return constants.get(token, token)
+
+    for service in described:
+        # Anchor on the *handler function name*, which is unique per service and
+        # immediately precedes its schema. Matching on the SERVICE_* constant
+        # alone is ambiguous: every registration mentions every other one
+        # nearby, so a greedy/non-greedy scan can pair a service with its
+        # neighbour's schema.
+        handler = f"_async_handle_{service}"
+        block = re.search(
+            rf"{handler},.*?vol\.Schema\(\s*\{{(.*?)\}}\s*,",
+            source,
+            re.DOTALL,
+        )
+        if block is None:
+            # ``reassess`` registers an empty schema.
+            block = re.search(
+                rf"{handler},.*?vol\.Schema\(\{{\}}(.*?)\)",
+                source,
+                re.DOTALL,
+            )
+        assert block is not None, f"could not locate the schema for {service}"
+
+        schema_fields = {
+            resolve(token)
+            for token in re.findall(
+                r"vol\.(?:Required|Optional)\((?:\w+\.)?(\w+)\)", block.group(1)
+            )
+        }
+        documented_fields = set(described[service].get("fields") or {})
+        assert documented_fields == schema_fields, (
+            f"{service}: services.yaml documents {sorted(documented_fields)}, "
+            f"schema uses {sorted(schema_fields)}"
+        )

@@ -1,0 +1,60 @@
+# Service descriptions for ClimatePilot.
+#
+# Home Assistant reads this file to render the service in Developer Tools and to
+# expose field metadata to automations and voice assistants. It logs
+# "Failed to load services.yaml for integration: climatepilot" on every startup
+# when the file is absent, even though the services themselves still work - the
+# error is noise that makes a healthy install look broken.
+#
+# The fields here mirror the voluptuous schemas registered in __init__.py. They
+# are documentation for the UI, not validation: validation happens in the
+# schema, so the two must be kept in step by hand.
+
+resume_auto:
+  name: 恢复自动
+  description: >-
+    清除某个房间的手动覆盖，让该房间回到自动调度。不传 zone_id 且不传
+    entity_id 时，清除所有房间的覆盖。
+  fields:
+    zone_id:
+      name: 房间 ID
+      description: 房间的内部标识（例如 living_room）。与 entity_id 二选一。
+      required: false
+      example: living_room
+      selector:
+        text:
+    entity_id:
+      name: 温控器实体
+      description: >-
+        房间温控器的 entity_id（例如 climate.livingroom_floorheating）。
+        与 zone_id 二选一；两者都传时以 zone_id 为准。
+      required: false
+      example: climate.livingroom_floorheating
+      selector:
+        entity:
+          domain: climate
+
+set_supply_temperature:
+  name: 手动设定供水温度
+  description: >-
+    手动下发一个供水温度给热源，用于调试或在设备语义核验完成前试探。该调用
+    需要「协调」模式且三项设备语义已确认，否则会被拒绝。
+  fields:
+    temperature:
+      name: 供水温度
+      description: 目标供水温度（摄氏度）。会被限制在热源实体自报的范围内。
+      required: true
+      example: 45
+      selector:
+        number:
+          min: 20
+          max: 90
+          step: 0.5
+          unit_of_measurement: "°C"
+
+reassess:
+  name: 立即重新评估
+  description: >-
+    立即执行一次完整评估周期，而不等待下一次轮询。用于调试或手动触发。
+    返回本次评估的决策摘要。
+  fields: {}
