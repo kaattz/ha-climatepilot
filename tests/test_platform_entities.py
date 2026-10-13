@@ -145,6 +145,75 @@ ZONES = {
 }
 
 
+def _schema_invalid_class() -> type[BaseException] | tuple[type[BaseException], ...]:
+    """Return every schema-validation error class this process may raise.
+
+    Home Assistant 2026.9 swaps the voluptuous implementation for ``probatio``
+    at import time (``install_as_voluptuous``). That swap is order-sensitive and
+    can leave *two* unrelated ``MultipleInvalid`` classes reachable in one
+    process:
+
+    * ``probatio.error.MultipleInvalid`` - the swap took effect;
+    * ``voluptuous.error.MultipleInvalid`` - some module imported voluptuous
+      first, so the swap did not.
+
+    Whether they are the same object depends on which test module pytest
+    imported first, so asserting either one alone makes the test pass or fail by
+    file ordering. Every reachable class from both libraries is collected, and
+    ``Exception`` is deliberately *not* in the list - the assertion must still
+    be about schema rejection, not about "something went wrong".
+    """
+    import voluptuous.error as voluptuous_error
+
+    candidates: list[type[BaseException]] = [
+        voluptuous_error.Invalid,
+        voluptuous_error.MultipleInvalid,
+    ]
+
+    try:  # pragma: no cover - only present on newer Home Assistant
+        import probatio.error as probatio_error
+
+        candidates.append(probatio_error.Invalid)
+        candidates.append(probatio_error.MultipleInvalid)
+    except ImportError:
+        pass
+
+    unique: list[type[BaseException]] = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+
+    if not unique:  # pragma: no cover - defensive
+        raise AssertionError("no schema validation error class found")
+    return unique[0] if len(unique) == 1 else tuple(unique)
+
+
+async def _assert_schema_rejects(hass, service: str, data: dict) -> None:
+    """Assert the registered schema rejects ``data``.
+
+    Checks the *behaviour* - a validation error is raised - while tolerating
+    both schema libraries Home Assistant may be using. The exception is matched
+    by walking its MRO for a class named ``Invalid``/``MultipleInvalid`` from
+    either library, which survives the import-order problem described above
+    without weakening the assertion into "any exception at all": a
+    ``ServiceNotFound`` or a ``TypeError`` must still fail the test.
+    """
+    try:
+        await hass.services.async_call(DOMAIN, service, data, blocking=True)
+    except BaseException as err:
+        names = {cls.__name__ for cls in type(err).__mro__}
+        modules = {cls.__module__ for cls in type(err).__mro__}
+        is_validation_error = bool(
+            names & {"Invalid", "MultipleInvalid", "RequiredFieldInvalid"}
+        ) and any(mod.startswith(("voluptuous", "probatio")) for mod in modules)
+        assert is_validation_error, (
+            f"expected a schema validation error, got {type(err).__module__}."
+            f"{type(err).__name__}: {err}"
+        )
+        return
+    raise AssertionError(f"schema accepted invalid data for {service}: {data!r}")
+
+
 # ---------------------------------------------------------------------------
 # Coordinator double
 # ---------------------------------------------------------------------------
@@ -505,6 +574,9 @@ class FakeCoordinator:
         self.system_id = ENTRY_ID
         self.name = "智暖领航"
         self.control_mode = control_mode
+        # The real coordinator always carries its config entry, and the zone
+        # device lookup needs its entry_id to scope the parent resolution.
+        self.entry = SimpleNamespace(entry_id=ENTRY_ID)
         self.zones: dict[str, ZoneState] = {}
         for zone_id, (entity_id, name) in ZONES.items():
             if zone_id not in zone_ids:
@@ -1523,15 +1595,33 @@ def test_unique_ids_isolated_per_entry() -> None:
 
 
 def test_zone_entities_share_parent_device() -> None:
-    """Zone entities are sub-devices of the system device (base.py contract)."""
+    """Zone entities are sub-devices of the system device (base.py contract).
+
+    The parent link is expressed with whichever key this Home Assistant accepts,
+    and the two are mutually exclusive: ``via_device`` (identifier tuple) was
+    removed in favour of ``via_device_id`` (registry id). Asserting the wrong
+    one either fails outright or - worse - passes while entity registration is
+    broken, which is how the original bug reached a release.
+    """
+    from custom_components.climatepilot.base import _supports_via_device_id
+
     coordinator = FakeCoordinator(compensation=FakeCompensation())
     system_info = ActiveZonesSensor(coordinator).device_info
     zone_info = EffectiveSetpointSensor(coordinator, "living_room").device_info
 
     assert (DOMAIN, ENTRY_ID) in system_info["identifiers"]
     assert (DOMAIN, f"{ENTRY_ID}_living_room") in zone_info["identifiers"]
-    assert zone_info["via_device"] == (DOMAIN, ENTRY_ID)
     assert zone_info["name"] == "客厅"
+
+    if _supports_via_device_id():
+        # Current HA: a registry id, resolved from the identifier tuple.
+        assert "via_device" not in zone_info, "the removed parameter must not be used"
+        # With no registry in this unit test the id cannot resolve, so the key is
+        # absent rather than wrong - the integration test proves the linked case.
+        assert "via_device_id" not in zone_info or isinstance(zone_info["via_device_id"], str)
+    else:
+        # Older HA: still the identifier tuple.
+        assert zone_info["via_device"] == (DOMAIN, ENTRY_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -2941,25 +3031,19 @@ class TestServicesWithRealRegistry:
     @pytest.mark.asyncio
     async def test_set_supply_temperature_requires_temperature(self) -> None:
         """The documented required field must be enforced by the schema."""
-        import voluptuous as vol
-
         from custom_components.climatepilot import _async_register_services
 
         coordinator = FakeCoordinator(compensation=FakeCompensation())
         hass = self._hass(coordinator)
         await _async_register_services(hass)
 
-        with pytest.raises(vol.Invalid):
-            await hass.services.async_call(
-                DOMAIN, SERVICE_SET_SUPPLY_TEMPERATURE, {}, blocking=True
-            )
-        with pytest.raises(vol.Invalid):
-            await hass.services.async_call(
-                DOMAIN,
-                SERVICE_SET_SUPPLY_TEMPERATURE,
-                {"temperature": 45.0, "bogus": 1},
-                blocking=True,
-            )
+        # Missing required field, and an unknown field (extra=FORBID).
+        await _assert_schema_rejects(hass, SERVICE_SET_SUPPLY_TEMPERATURE, {})
+        await _assert_schema_rejects(
+            hass,
+            SERVICE_SET_SUPPLY_TEMPERATURE,
+            {"temperature": 45.0, "bogus": 1},
+        )
 
     @pytest.mark.asyncio
     async def test_resume_auto_accepts_entity_id_alias(self) -> None:
@@ -2980,18 +3064,15 @@ class TestServicesWithRealRegistry:
 
     @pytest.mark.asyncio
     async def test_resume_auto_rejects_unknown_field(self) -> None:
-        import voluptuous as vol
-
         from custom_components.climatepilot import _async_register_services
 
         coordinator = FakeCoordinator(compensation=FakeCompensation())
         hass = self._hass(coordinator)
         await _async_register_services(hass)
 
-        with pytest.raises(vol.Invalid):
-            await hass.services.async_call(
-                DOMAIN, SERVICE_RESUME_AUTO, {"nope": "x"}, blocking=True
-            )
+        # Asserted through the helper so the check survives Home Assistant's
+        # schema-library swap (see ``_assert_schema_rejects``).
+        await _assert_schema_rejects(hass, SERVICE_RESUME_AUTO, {"nope": "x"})
 
     @pytest.mark.asyncio
     async def test_setup_entry_services_work_end_to_end(self) -> None:

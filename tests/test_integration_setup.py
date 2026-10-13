@@ -141,11 +141,35 @@ async def hass(tmp_path):
     # The registries entities are added through. Home Assistant loads these
     # during bootstrap; loading them here is what lets entities be registered
     # with real unique ids instead of failing inside the entity platform.
+    #
+    # The order and the arguments mirror homeassistant/bootstrap.py, which
+    # differs between releases - the store manager must be initialised, and
+    # newer versions need ``device_registry.async_setup`` before the load plus
+    # ``load_empty`` for a registry with no file on disk. Both are detected
+    # rather than assumed, so the same test file runs on 2026.2 and 2026.9.
     from homeassistant.helpers import area_registry, device_registry, entity_registry
 
-    await area_registry.async_load(instance)
-    await device_registry.async_load(instance)
-    await entity_registry.async_load(instance)
+    try:
+        from homeassistant.helpers.storage import get_internal_store_manager
+    except ImportError:  # pragma: no cover - older HA
+        get_internal_store_manager = None  # type: ignore[assignment]
+
+    if get_internal_store_manager is not None:
+        await get_internal_store_manager(instance).async_initialize()
+
+    async def _load(module) -> None:
+        """Load a registry, tolerating both old and new signatures."""
+        if hasattr(module, "async_setup"):
+            module.async_setup(instance)
+        try:
+            await module.async_load(instance)
+        except (RuntimeError, AssertionError):
+            # No registry file yet: newer HA requires an explicit opt-in.
+            await module.async_load(instance, load_empty=True)
+
+    await _load(area_registry)
+    await _load(device_registry)
+    await _load(entity_registry)
 
     # climate.* services so the coordinator's writes are accepted.
     calls: list[tuple[str, str, dict]] = []
@@ -524,6 +548,50 @@ async def test_entity_states_are_readable_not_unavailable(hass):
 
     unavailable = [eid for eid, state in states.items() if state.state == "unavailable"]
     assert not unavailable, f"unavailable after a successful setup: {unavailable}"
+
+
+async def test_zone_devices_are_linked_to_the_system_device(hass):
+    """Zone sub-devices must actually resolve their parent in a real registry.
+
+    This is the check that would have caught the ``via_device`` removal: the
+    unit test can only assert which key is used, because a mock coordinator has
+    no registry to resolve against. Here the entities registered for real, so
+    the parent id is either present and correct or the link is broken.
+
+    Getting it wrong is not cosmetic - passing the removed ``via_device``
+    parameter raises inside device registration, which aborts *every* zone
+    entity and silently drops the whole per-room half of the integration.
+    """
+    from homeassistant.helpers import device_registry
+
+    entry = await setup_entry(hass)
+    registry = device_registry.async_get(hass)
+
+    # Collecting every device changed shape across releases: older HA exposes
+    # ``devices`` as a mapping (iteration yields ids), newer HA makes it a
+    # collection of entries and *raises* if it is used as a mapping. Normalise
+    # here so the assertion below is about the link, not about the container.
+    raw = registry.devices
+    candidates = list(raw)
+    ours = []
+    for item in candidates:
+        device = item if hasattr(item, "identifiers") else registry.async_get(item)
+        if device is not None and any(identifier[0] == DOMAIN for identifier in device.identifiers):
+            ours.append(device)
+    assert len(ours) == 3, f"expected hub + 2 zone devices, got {len(ours)}"
+
+    # The hub is the one with no parent.
+    hubs = [d for d in ours if d.via_device_id is None]
+    assert len(hubs) == 1, "exactly one device should be the root"
+    hub_id = hubs[0].id
+    assert (DOMAIN, entry.entry_id) in hubs[0].identifiers
+
+    zones = [d for d in ours if d.via_device_id is not None]
+    assert len(zones) == 2, f"both zone devices should have a parent, got {len(zones)}"
+    for device in zones:
+        assert device.via_device_id == hub_id, (
+            f"{device.name} points at {device.via_device_id}, not the hub {hub_id}"
+        )
 
 
 async def test_services_are_registered(hass):
