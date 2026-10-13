@@ -47,18 +47,22 @@
 | translation_key | **英文名（en.json 必须逐字使用）** | 推导出的 entity_id |
 |---|---|---|
 | `return_temperature` | `Return temperature` | `sensor.<dev>_return_temperature` |
-| `delta_t` | `Delta T` | `sensor.<dev>_delta_t` |
-| `delta_t_quality` | `Delta T quality` | `sensor.<dev>_delta_t_quality` |
-| `condensing_regime` | `Condensing regime` | `sensor.<dev>_condensing_regime` |
-| `hydraulic_verdict` | `Hydraulic verdict` | `sensor.<dev>_hydraulic_verdict` |
-| `curve_calibration_advice` | `Curve calibration advice` | `sensor.<dev>_curve_calibration_advice` |
-| `probe_fault` | `Probe fault` | `binary_sensor.<dev>_probe_fault` |
+| `delta_t` | `Delta T` | `sensor.cp_delta_t` |
+| `delta_t_quality` | `Delta T quality` | `sensor.cp_delta_t_quality` |
+| `condensing_regime` | `Condensing regime` | `sensor.cp_condensing_regime` |
+| `hydraulic_verdict` | `Hydraulic verdict` | `sensor.cp_hydraulic_verdict` |
+| `curve_calibration_advice` | `Curve calibration advice` | `sensor.cp_curve_calibration_advice` |
+| `probe_fault` | `Probe fault` | `binary_sensor.cp_probe_fault` |
 
-`<dev>` = `slugify(系统名)`；参考安装「我的家」→ `wo_de_jia`。
+> **V0.4 更新：** 上表的第三列原为 `sensor.<dev>_delta_t` 等，其中
+> `<dev> = slugify(系统名)`（参考安装「我的家」→ `wo_de_jia`）。V0.4 起实体 ID 固定为
+> `<domain>.cp_<key>`，与设备名无关，故第三列已按新规则改写。第二列的 7 个英文名
+> 仍然是显示名契约，未变。
 
-**这 7 个英文名经过实测校验：`slugify(英文名) == translation_key`**（全部 7/7 相等），
-所以 dashboard 的 entity_id 就是 `<platform>.<dev>_<translation_key>`，无需额外查表。
-**E-I18N 不得改动这 7 个英文名**；E-UI 按此写 dashboard，并在 `test_integration_setup.py` 里用
+**这 7 个英文名经过实测校验：`slugify(英文名) == translation_key`**（全部 7/7 相等）。
+V0.4 之前这一点很重要，因为当时的 entity_id 由英文名派生；现在 ID 直接由 `key` 决定，
+这一相等性不再是 ID 正确性的前提，但**E-I18N 仍不得改动这 7 个英文名**（它们是显示名契约）。
+E-UI 按此写 dashboard，并在 `test_integration_setup.py` 里用
 **真实 entity_registry** 双向校验（不得用与被验证对象相同的假设推导）。
 
 **实体清单：**

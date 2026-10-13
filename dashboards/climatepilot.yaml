@@ -1,26 +1,31 @@
-# ClimatePilot — Lovelace dashboard (V0.3)
+# ClimatePilot — Lovelace dashboard (V0.4)
 #
 # Sections layout, five groups: system overview, demand combinations,
 # combustion quality, external probes / delta-T (V0.3), and per-room
 # arbitration + comfort.
 #
 # HOW TO USE
-#   1. Entity ids below are the ones a reference installation produces: system
-#      named "我的家", rooms "客厅地暖" / "主卧地暖", UI language zh-Hans - the
-#      same installation tests/test_integration_setup.py boots. NOTE the shape:
-#      the *display names* are Chinese, but the *ids* are English slugs
-#      (`wo_de_jia_heating_state`, not `wo_de_jia_cai_nuan_zhuang_tai`).
+#   1. Entity ids below are stable and identical on every installation:
 #
-#      That is HA's deliberate design, not an oversight: an entity id is only
-#      built from the localised name when the UI language is in
-#      `homeassistant.generated.languages.NATIVE_ENTITY_IDS` - 41 languages,
-#      none of them Chinese. Every other language falls back to English for the
-#      id while still showing a translated name, so ids stay stable and ASCII.
+#          <domain>.cp_<key>              system-level
+#          <domain>.cp_<zone_id>_<key>    per-room
 #
-#      YOURS WILL STILL DIFFER unless you use these exact device names: the
-#      English entity name is prefixed with the slug of the *device* name, so
-#      renaming the system or a room moves every id under it. See
-#      docs/DASHBOARD.md section 1 for the full rule and how to list your ids.
+#      e.g. `sensor.cp_heating_state`, `sensor.cp_living_room_effective_setpoint`.
+#
+#      The `cp_` prefix is pinned in code (custom_components/climatepilot/base.py,
+#      ENTITY_ID_PREFIX) and deliberately does NOT follow the device name.
+#
+#      Earlier releases derived ids from the device name, which meant a Chinese
+#      system name produced pinyin ids (`wo_de_jia_heating_state`) and a Chinese
+#      room name produced pinyin room ids (`ke_ting_di_nuan_effective_setpoint`).
+#      The same rule also made an id depend on the backend *language*, since the
+#      name part came from a translation. Both couplings are gone.
+#
+#      Installing this release on an older install renames the existing entities
+#      once, automatically - see custom_components/climatepilot/migration.py.
+#
+#      Only the two KNX thermostats are yours rather than ours, so they keep
+#      their own ids (`climate.livingroom_floorheating`).
 #   2. Nothing is registered automatically. Either:
 #        a) Settings > Dashboards > + Add dashboard > (new, empty) > open it >
 #           pencil > Raw configuration editor > paste this whole file > Save; or
@@ -410,7 +415,9 @@ views:
 
           # ---- Room 2: 主卧地暖 ------------------------------------------
           # Same cards as room 1. Duplicate this block per extra room and
-          # substitute that room's slug in place of `zhu_wo_di_nuan`.
+          # substitute that room's zone_id in place of `master_bedroom`. The
+          # zone_id is the one used in the config flow; entity ids do not depend
+          # on the room's display name.
           - type: heading
             heading: 主卧地暖
             heading_style: subtitle

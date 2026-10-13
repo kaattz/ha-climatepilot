@@ -270,80 +270,47 @@ coordinator.unexplained_burns: int
 - 提交前：`ruff check custom_components/ tests/ tools/` 与 `ruff format` 必须干净。
 - 汇报必须贴**真实 pytest / ruff 输出**，不得只说"通过"。
 
-## 5. 实体 ID 的 slug 规则（**容易搞错，务必阅读**）
+## 5. 实体 ID（V0.4 起：固定 `cp_` 前缀）
 
-Home Assistant **只在"原生实体 ID 语言"里才用本地化名生成 entity_id**：
+> **V0.2 时本节标题是「实体 ID 的 slug 规则」，写的是
+> `entity_id` = `slugify(英文名)` + `slugify(设备名)`，并附了一张参考安装的具体 ID
+> 对照表。V0.4 起该规则已废除，那张表必然过期 —— 照抄它会得到本版本根本不创建的 ID，
+> 所以整节替换。**
 
-```python
-# homeassistant/helpers/entity_platform.py
-object_id_language = (
-    hass.config.language
-    if hass.config.language in languages.NATIVE_ENTITY_IDS
-    else languages.DEFAULT_LANGUAGE          # "en"
-)
+现在的规则只有一条，且所有安装一致：
+
+```
+<domain>.cp_<key>             系统级
+<domain>.cp_<zone_id>_<key>   房间级
 ```
 
-实测（HA 2026.2）：
-```
-languages.DEFAULT_LANGUAGE = "en"
-"zh-Hans" in languages.NATIVE_ENTITY_IDS  ->  False
-```
-`NATIVE_ENTITY_IDS` 只含约 40 种拉丁/欧洲语言（de / fr / es / it / nl / pl / sv …），**不含中文**。
+`cp_` 前缀硬编码在 `base.py` 的 `ENTITY_ID_PREFIX`，**不跟随设备名**。
 
-因此对中文用户：
-- **显示名（`name`）用中文** —— 翻译生效；
-- **`entity_id` 用英文名生成** —— 与语言无关，保持 ASCII。
+### 为什么放弃 HA 的默认命名
 
-实测同一个实体：
-```
-name      = 采暖状态                              <- 中文翻译
-entity_id = sensor.wo_de_jia_heating_state        <- 英文名 slugify
-```
+HA 默认 `设备名_实体名`（本身是好设计：设备名充当来源标识，避免跨集成撞车）。
+但本集成因此产生了两类拼音 ID：
 
-**推论（写文档/面板时必须遵守）：**
-1. 任何引用了具体 `entity_id` 的产物（Lovelace YAML、模板、自动化示例）都**不能**用
-   `slugify(中文名)` 推导，否则对**所有**用户都是坏的。
-2. 校验 `entity_id` 必须**从真实 `entity_registry` 读取**，不能自己再算一遍 slug
-   —— 用同一个错误假设做正向与反向推导会"自洽地通过"，但都不符 HA 实际行为。
-3. `translation_key` 是稳定契约；`entity_id` 的 slug 由**英文名 + 设备名**决定，随英文名改动而变。
+| 旧 ID | 拼音来自 |
+|---|---|
+| `sensor.wo_de_jia_heating_state` | 系统名称「我的家」 |
+| `sensor.ke_ting_di_nuan_effective_setpoint` | 房间名「客厅地暖」 |
 
-**当前参考安装（系统名"我的家"）的权威映射：**
+并且名字部分取自**翻译**，所以 ID 还依赖**后端语言** —— 同一实体在德语安装上会得到
+不同 ID。新方案把这两个耦合都去掉了。
 
-系统级（18）：
-```
-heating_state                sensor.wo_de_jia_heating_state
-active_zones                 sensor.wo_de_jia_zones_demanding_heat
-suggested_supply_temp        sensor.wo_de_jia_suggested_supply_temperature
-outdoor_temperature          sensor.wo_de_jia_outdoor_temperature
-supply_temperature           sensor.wo_de_jia_supply_temperature
-burner_starts_24h            sensor.wo_de_jia_burner_starts_24_h
-last_burn_duration           sensor.wo_de_jia_last_burn_duration
-dominant_zone_combination    sensor.wo_de_jia_dominant_zone_combination
-zone_combination_count       sensor.wo_de_jia_distinct_zone_combinations_24_h
-combinations_24h             sensor.wo_de_jia_zone_combination_breakdown_24_h
-cycling_quality              sensor.wo_de_jia_combustion_quality
-unexplained_burns_24h        sensor.wo_de_jia_unexplained_burner_starts_24_h
-short_cycle_alert            binary_sensor.wo_de_jia_short_cycle_alert
-degraded                     binary_sensor.wo_de_jia_degraded_operation
-control_mode                 select.wo_de_jia_control_mode
-reassess                     button.wo_de_jia_reassess_now
-supply_temperature_override  number.wo_de_jia_manual_supply_temperature
-system_thermostat            climate.wo_de_jia_whole_home_heating
-```
+### 仍然成立的两条教训（V0.2 踩过的坑，保留）
 
-每房间（13；`<room>` = 客厅 `ke_ting_di_nuan` / 主卧 `zhu_wo_di_nuan`）：
-```
-effective_setpoint   sensor.<room>_effective_setpoint
-setpoint_source      sensor.<room>_setpoint_source
-zone_temperature     sensor.<room>_room_temperature
-override_remaining   sensor.<room>_manual_override_remaining
-comfort_verdict      sensor.<room>_comfort_verdict
-comfort_advice       sensor.<room>_comfort_advice
-manual_override      binary_sensor.<room>_manual_override_active
-heat_request         binary_sensor.<room>_heat_request
-overheating          binary_sensor.<room>_overheating
-underheating         binary_sensor.<room>_underheating
-resume_auto          button.<room>_resume_automatic
-auxiliary_load       switch.<room>_auxiliary_heat_load
-zone_mode            select.<room>_room_mode
-```
+1. **不要用 `slugify(中文名)` 推导 `entity_id`。**
+   中文名经 HA 的 `slugify` 后是**空字符串** —— 拼音是 HA 对**设备名**做 slugify 的
+   结果，不是对实体名。当年面板 45 个 ID 全错，正是把两者混为一谈。
+
+2. **校验 `entity_id` 必须从真实 `entity_registry` 读取**，不能自己再算一遍。
+   用同一个错误假设做正向推导与反向校验会「自洽地通过」，却全部不符合 HA 实际行为。
+   `tests/test_integration_setup.py::test_dashboard_entity_ids_exist_in_the_registry`
+   就是为此存在的**独立**检查：它从启动后的 HA 读取真实 ID，不做任何推导。
+
+### `translation_key` 仍是稳定契约
+
+实体 ID 由 `key` 决定，而 `key` 与 `translation_key` 一致。翻译只影响显示名，
+不再影响任何 ID。

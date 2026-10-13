@@ -10,160 +10,57 @@ V0.2 的"每房间 / 锅炉调度可视化"。这个文件夹里只有**一份�
 
 ---
 
-## 1. 先读这段：实体 ID 不是固定契约
+## 1. 实体 ID 是固定契约（V0.4 起）
 
-**实体 ID 由「设备名的 slug + 英文实体名的 slug」决定 —— 即使界面是中文，实体 ID 也是英文。**
-
-这是 Home Assistant 的刻意设计，不是遗漏。只有界面语言属于
-`homeassistant.generated.languages.NATIVE_ENTITY_IDS`（41 种，全部是拉丁/欧洲语言：
-`de`/`fr`/`es`/`it`/`nl`/`pl`/`sv`…）时，HA 才用**本地化**名字生成 `object_id`；
-其余语言一律回退到 `en`：
-
-```python
-# homeassistant/helpers/entity_platform.py:162-186（HA 2026.2）
-object_id_language = (
-    hass.config.language
-    if hass.config.language in languages.NATIVE_ENTITY_IDS
-    else languages.DEFAULT_LANGUAGE          # "en"
-)
-```
-
-**`zh-Hans` 不在该集合里**（该集合中没有任何中文变体）。所以中文用户的实际情况是：
+**你不需要推算任何 ID。** 它们在所有安装上完全一致：
 
 ```
-显示名 name   = 采暖状态                        <- 中文翻译生效，界面上看到的是中文
-entity_id     = sensor.wo_de_jia_heating_state  <- 英文名生成，ID 保持 ASCII
+<domain>.cp_<key>             系统级
+<domain>.cp_<zone_id>_<key>   房间级
 ```
 
-好处是实体 ID 不会随界面语言漂移；代价是**中文 ID 的直觉是错的** —— 你不能拿中文名去
-slugify，`slugify("客厅地暖 采暖请求")` 会得到 `ke_ting_di_nuan_cai_nuan_qing_qiu`，
-而真实 ID 是 `binary_sensor.ke_ting_di_nuan_heat_request`。
+例如 `sensor.cp_heating_state`、`sensor.cp_living_room_effective_setpoint`。
 
-### 参考安装的实际 ID 对照表
+`cp_` 前缀**硬编码在代码里**（`custom_components/climatepilot/base.py` 的
+`ENTITY_ID_PREFIX`），**有意不跟随设备名**。
 
-本仓库测试用的参考安装：系统名"我的家"，房间"客厅地暖" / "主卧地暖"，界面语言 `zh-Hans`。
-下表是**从真实 HA 实例的 `entity_registry` 读出来的**（不是推算的），共 38 个 translation_key：
+### 为什么不用 HA 的默认命名
 
-| translation_key（固定，不会变） | 实际实体 ID（英文 slug） |
+Home Assistant 的默认规则是 `设备名_实体名`（这本身是好设计：设备名充当来源标识）。
+但本集成早先的版本因此产生了两类拼音 ID：
+
+| 旧 ID | 拼音来源 |
 |---|---|
-| `sensor.heating_state` | `sensor.wo_de_jia_heating_state` |
-| `sensor.active_zones` | `sensor.wo_de_jia_zones_demanding_heat` |
-| `sensor.suggested_supply_temp` | `sensor.wo_de_jia_suggested_supply_temperature` |
-| `sensor.outdoor_temperature` | `sensor.wo_de_jia_outdoor_temperature` |
-| `sensor.supply_temperature` | `sensor.wo_de_jia_supply_temperature` |
-| `sensor.burner_starts_24h` | `sensor.wo_de_jia_burner_starts_24_h` |
-| `sensor.last_burn_duration` | `sensor.wo_de_jia_last_burn_duration` |
-| `sensor.dominant_zone_combination` | `sensor.wo_de_jia_dominant_zone_combination` |
-| `sensor.zone_combination_count` | `sensor.wo_de_jia_distinct_zone_combinations_24_h` |
-| `sensor.combinations_24h` | `sensor.wo_de_jia_zone_combination_breakdown_24_h` |
-| `sensor.cycling_quality` | `sensor.wo_de_jia_combustion_quality` |
-| `sensor.unexplained_burns_24h` | `sensor.wo_de_jia_unexplained_burner_starts_24_h` |
-| `binary_sensor.short_cycle_alert` | `binary_sensor.wo_de_jia_short_cycle_alert` |
-| `binary_sensor.degraded` | `binary_sensor.wo_de_jia_degraded_operation` |
-| `select.control_mode` | `select.wo_de_jia_control_mode` |
-| `button.reassess` | `button.wo_de_jia_reassess_now` |
-| `number.supply_temperature_override` | `number.wo_de_jia_manual_supply_temperature` |
-| `climate.system_thermostat` | `climate.wo_de_jia_whole_home_heating` |
-| `sensor.effective_setpoint`（每房间） | `sensor.<room>_effective_setpoint` |
-| `sensor.setpoint_source`（每房间） | `sensor.<room>_setpoint_source` |
-| `sensor.zone_temperature`（每房间） | `sensor.<room>_room_temperature` |
-| `sensor.override_remaining`（每房间） | `sensor.<room>_manual_override_remaining` |
-| `sensor.comfort_verdict`（每房间） | `sensor.<room>_comfort_verdict` |
-| `sensor.comfort_advice`（每房间） | `sensor.<room>_comfort_advice` |
-| `binary_sensor.manual_override`（每房间） | `binary_sensor.<room>_manual_override_active` |
-| `binary_sensor.heat_request`（每房间） | `binary_sensor.<room>_heat_request` |
-| `binary_sensor.overheating`（每房间） | `binary_sensor.<room>_overheating` |
-| `binary_sensor.underheating`（每房间） | `binary_sensor.<room>_underheating` |
-| `select.zone_mode`（每房间） | `select.<room>_room_mode` |
-| `button.resume_auto`（每房间） | `button.<room>_resume_automatic` |
-| `switch.auxiliary_load`（每房间） | `switch.<room>_auxiliary_heat_load` |
+| `sensor.wo_de_jia_heating_state` | 系统名称"我的家" |
+| `sensor.ke_ting_di_nuan_effective_setpoint` | 房间名"客厅地暖" |
 
-V0.3 新增 7 个（全部系统级，见 INTERFACES_V0.3.md 第 3 节）。这 7 个的
-**英文名恰好与 translation_key 逐字相同**（已冻结，E-I18N 不得改动），所以 ID 无需查表：
+而且名字部分取自**翻译**，所以 ID 还依赖**后端语言** —— 同一个实体在德语安装上会
+得到不同的 ID。新方案两个耦合都没有了。
 
-| translation_key（固定） | 英文名 | 实际实体 ID |
-|---|---|---|
-| `sensor.return_temperature` | Return temperature | `sensor.wo_de_jia_return_temperature` |
-| `sensor.delta_t` | Delta T | `sensor.wo_de_jia_delta_t` |
-| `sensor.delta_t_quality` | Delta T quality | `sensor.wo_de_jia_delta_t_quality` |
-| `sensor.condensing_regime` | Condensing regime | `sensor.wo_de_jia_condensing_regime` |
-| `sensor.hydraulic_verdict` | Hydraulic verdict | `sensor.wo_de_jia_hydraulic_verdict` |
-| `sensor.curve_calibration_advice` | Curve calibration advice | `sensor.wo_de_jia_curve_calibration_advice` |
-| `binary_sensor.probe_fault` | Probe fault | `binary_sensor.wo_de_jia_probe_fault` |
+### 只有两个实体是"你自己的"
 
-`<room>` 是**房间名**的 slug：客厅地暖 → `ke_ting_di_nuan`，主卧地暖 → `zhu_wo_di_nuan`，
-英文房间名则直接用（`Living room` → `living_room`）。
+| 实体 | 说明 |
+|---|---|
+| `climate.livingroom_floorheating` | 客厅 KNX 温控器 |
+| `climate.master_bedroom_floorheating` | 主卧 KNX 温控器 |
 
-### 有几处英文名与 translation_key 不同，最容易写错
+这两个由**你的 KNX 集成**创建，不在这 52 个之内，按你的实际实体名替换。
 
-| translation_key | 英文名 | 所以 ID 里是 |
-|---|---|---|
-| `cycling_quality` | Combustion quality | `combustion_quality`（**不是** `cycling_quality`） |
-| `zone_combination_count` | Distinct zone combinations (24 h) | `distinct_zone_combinations_24_h` |
-| `combinations_24h` | Zone combination breakdown (24 h) | `zone_combination_breakdown_24_h` |
-| `unexplained_burns_24h` | Unexplained burner starts (24 h) | `unexplained_burner_starts_24_h` |
-| `active_zones` | Zones demanding heat | `zones_demanding_heat` |
-| `zone_temperature` | Room temperature | `room_temperature` |
-| `zone_mode` | Room mode | `room_mode` |
-| `resume_auto` | Resume automatic | `resume_automatic` |
-| `manual_override` | Manual override active | `manual_override_active` |
-| `burner_starts_24h` | Burner starts (24 h) | `burner_starts_24_h`（`24_h`，不是 `24h`） |
+### 房间多于两个
 
-`24_h` 的来历：显示名里的 `(24 h)` 经 slugify 后，括号被丢弃、`24` 与 `h` 之间插入下划线。
+复制"Room 2"那一整块，把 `master_bedroom` 替换成新房间的 `zone_id`（配置流程里用的
+那个），以及对应的 `climate.*` 实体名。**ID 与房间的显示名无关**，所以中文房间名
+不会影响任何 ID。
 
-### 规则总结（用来推算自己的 ID）
+### 从旧版本升级
 
-1. 取该实体所属**设备的显示名**的 slug：系统级用系统名（配置里"系统名称"，默认
-   `ClimatePilot`），房间级用房间名；
-2. 取该实体的**英文名**（来自 `translations/en.json`，不是中文名）的 slug；
-3. 拼成 `<domain>.<设备名slug>_<英文名slug>`。
+本版本首次启动时会**自动把已有实体重命名一次**（`wo_de_jia_*` 与
+`ke_ting_di_nuan_*` → `cp_*`），保留历史与 unique_id，见
+`custom_components/climatepilot/migration.py`。之后无需任何手工操作。
 
-**唯一可靠的验证办法是从真实实例读**，不要自己算 slug —— 正反两边用同一个错误假设，
-会得出"自洽但错误"的结论（本项目就踩过这个坑）。见下面的方法。
+### 怎么确认自己系统上的真实 ID
 
-### 怎么拿到自己的真实 ID
-
-任选其一：
-
-1. **开发者工具 → 状态**，搜索框输入 `climatepilot`（或你的系统名），逐条复制 `entity_id`；
-2. **设置 → 设备与服务 → ClimatePilot → 设备**，点进系统设备 / 某个房间子设备，
-   实体列表里的 ID 即真实值；
-3. 命令行（按 `unique_id` 前缀过滤，最干净 —— 不依赖实体名长什么样）：
-
-   ```bash
-   curl -s -H "Authorization: Bearer $HA_TOKEN" \
-        http://homeassistant.local:8123/api/config/entity_registry/list \
-     | python -c "
-   import json,sys
-   for e in json.load(sys.stdin):
-       if e['platform']=='climatepilot':
-           print(e['entity_id'], '|', e['unique_id'])
-   "
-   ```
-
-4. **本仓库内**（改面板后自查）：`tests/test_platform_entities.py` 里有一条断言把
-   `dashboards/climatepilot.yaml` 的每个引用与 `strings.json` 的 translation_key 集合做双向校验，
-   改了 key 或改了面板都会立刻变红。
-
-最省事的办法：在 HA 里**重命名实体 ID**（设置 → 实体 → 齿轮 → 实体 ID），把它们改成
-你自己的统一前缀（例如 `sensor.hvac_heating_state`）。重命名是持久化的，此后
-**设备改名、界面语言变化都不会再动 ID**，slug 规则彻底退出 —— 强烈建议这么做，
-因为你一旦改了系统名或房间名，下面所有 ID 都会跟着变。
-
-### 本文件里哪些 ID 需要改
-
-`dashboards/climatepilot.yaml` 用的是参考安装的两个房间：`客厅地暖`（`ke_ting_di_nuan_*`）
-与 `主卧地暖`（`zhu_wo_di_nuan_*`），两者都来自**真实实例的 entity_registry**。
-
-- 所有 `wo_de_jia_*`（系统级）取决于你的**系统名称**：如果你没把它设成"我的家"，
-  这一整批都要换成你系统名的 slug；
-- `ke_ting_di_nuan_*` / `zhu_wo_di_nuan_*`（房间级）取决于你的**房间名**，同上；
-- `climate.livingroom_floorheating` / `climate.master_bedroom_floorheating` 是那两个房间的
-  KNX 温控器实体 —— 这是**你自己的既有实体**，不在集成生成的 44 个之内，按实际替换；
-- 房间多于两个时，把"Room 2"那一整块复制一份，替换房间 slug 与 `climate.*` 即可。
-
-> **最快的做法**：把面板粘进去之前，先全局替换 `wo_de_jia` → 你系统名的 slug、
-> `ke_ting_di_nuan` / `zhu_wo_di_nuan` → 你两个房间名的 slug。三处替换就能覆盖全部 43 个引用。
+设置 → 开发者工具 → 状态，筛选 `cp_` 即可；或搜索实体名。
 
 ---
 

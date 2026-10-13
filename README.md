@@ -10,10 +10,11 @@ by [HomeAxis](https://github.com/kaattz)
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-18BCF2.svg)](https://www.home-assistant.io/)
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **v0.3.0 — 未部署到实机、未经现场验证。** 全部阈值与曲线均为设计建议值。
+> **v0.4.0 — 已在一台实机上以「观察模式」运行，但观察期未满、未经完整采暖季验证。**
+> 全部阈值与曲线仍为设计建议值。**v0.4.0 改变了全部实体 ID**（见 CHANGELOG）。
 > 外贴探头属于**监测/优化输入，不承担锅炉安全停机功能**。
 > 见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -138,6 +139,21 @@ V0.2 在此之上增加**燃烧质量分级**（`cycling_quality`，只看采暖
   `probe_fault` 保持 off。
 
 安装要求与逐项处置建议见 [DEPLOYMENT 7.5](docs/DEPLOYMENT.md)。
+
+### 8. 采暖季开关（V0.4）
+
+`switch.cp_heating_season` —— 非采暖季把集成关掉，但不必卸载：
+
+| 开关 | 实际状态 | 行为 |
+|---|---|---|
+| **OFF**（停季） | `paused` | 撤销自己发出的供暖请求，**阻断全部写入** |
+| **ON**（开季） | `observe` | 恢复监测与建议，**仍不写入** |
+
+- **ON 只回到观察模式，不会直接开始控制。** 按一下季节开关就开始写锅炉是个不该有的
+  行为；真正接管仍需你在控制模式里显式选择 `coordinate`。
+- **不碰锅炉自身的开关状态** —— 只收回"我们自己发出的"请求（集成只关闭自己打开的东西）。
+- 状态派生自控制模式，不独立存储，所以不会出现"季节说开、模式说暂停"的矛盾。
+- 控制模式持久化在配置项里，**夏天重启不会自己开始采暖**。
 
 ## 安装
 

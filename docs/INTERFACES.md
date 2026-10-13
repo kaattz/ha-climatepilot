@@ -18,6 +18,20 @@
 5. 所有面向用户的字符串都要有 `strings.json` + `translations/en.json` + `translations/zh-Hans.json`。
 6. 平台文件遵守 HA 现代写法：`_attr_has_entity_name = True`、`translation_key`、`unique_id` 稳定、
    `async_setup_entry` + `async_add_entities`，不要 legacy `entity_id` 参数。
+7. **实体 ID 使用固定 `cp_` 前缀，有意不跟随设备名**（V0.4 起）。
+   `base.py` 的 `entity_id_for(domain, key)` → `<domain>.cp_<key>`；房间级为
+   `<domain>.cp_<zone_id>_<key>`。命名只在该函数与 `ClimatePilotEntity.add_to_platform_start`
+   两处决定，**平台文件与实体构造函数不得自行设置 `entity_id`**。
+
+   这是对 HA 默认约定的**有意偏离**，理由记录在 `base.py` 的 `ENTITY_ID_PREFIX` 注释里：
+   HA 默认 `设备名_实体名`，而本集成的设备名是中文，`slugify` 只能转写成拼音
+   （「我的家」→ `wo_de_jia`、「客厅地暖」→ `ke_ting_di_nuan`）；且名字部分取自翻译，
+   会让 ID 依赖后端语言。改用设备名派生还会把 ID 绑到用户可改的显示名上 ——
+   改一次系统名就会改掉全部 52 个实体 ID。
+
+   **升级路径**：`migration.py` 在平台加载前把旧 ID 重命名一次（保留 unique_id 与历史）。
+   **修改命名规则时**：`tests/test_entity_id_scheme.py`（规则）、`tests/test_entity_id_migration.py`
+   （迁移）、`tests/test_integration_setup.py`（真实注册表）三处都要过。
 
 ## 1. 已冻结的公共符号
 

@@ -13,6 +13,60 @@ ClimatePilot（智暖领航）的全部重要变更都记录在此。
 
 ---
 
+## [0.4.0] — 2026-10-13
+
+> **破坏性变更：全部实体 ID 改变。** 升级后集成会自动重命名（保留历史与
+> unique_id），但**你自己的自动化、脚本或面板如果写死了旧 ID，需要跟着改**。
+
+### Changed（破坏性）
+
+- **实体 ID 改为固定 `cp_` 前缀**，不再由设备名派生：
+
+  | 之前 | 现在 |
+  |---|---|
+  | `sensor.wo_de_jia_heating_state` | `sensor.cp_heating_state` |
+  | `sensor.ke_ting_di_nuan_effective_setpoint` | `sensor.cp_living_room_effective_setpoint` |
+  | `climate.wo_de_jia_whole_home_heating` | `climate.cp_system_thermostat` |
+
+  旧 ID 有两处拼音：系统名称「我的家」→ `wo_de_jia`，房间名「客厅地暖」→
+  `ke_ting_di_nuan`。而且名字部分取自**翻译**，所以 ID 还依赖后端语言 ——
+  同一个实体在德语安装上会得到不同 ID。这两处耦合现在都没有了。
+
+  **为什么不用「把系统名改成 ASCII」来解决**：那会让 ID 绑在用户可改的显示名上，
+  改一次系统名就会改掉全部 52 个实体 ID；而且 `name_by_user` 优先于 `name`，
+  将来有人在界面里把设备改回中文，新建的实体又会变回拼音。
+
+  名字部分改用实体自己的内部键，因此**翻译改动不再影响任何 ID**。
+
+- **新增 `switch.cp_heating_season` 采暖季开关**：OFF = 停季（`paused`，撤销自己的
+  供暖请求、阻断全部写入），ON = 开季（`observe`，恢复监测与建议，**仍不写入**）。
+  它**不会**直接进入 `coordinate` —— 按一下开关就开始写锅炉是个不该有的行为。
+  状态派生自 `control_mode`，不独立存储。它也不碰锅炉自身的开关状态，
+  只收回"我们自己发出的"请求。
+
+### Added
+
+- **自动迁移**（`migration.py`）：在平台加载前把已有实体从旧 ID 重命名到 `cp_*`，
+  用 HA 官方的 `async_update_entity`，**保留 unique_id、历史与引用关系**。
+  幂等；无法重命名时记日志并跳过，而不是让集成装载失败。
+- `services.yaml`：此前缺失，导致**每次启动都有一行 ERROR**
+  （`Failed to load services.yaml for integration: climatepilot`）。服务本身照常工作，
+  所以测试完全没发现 —— 只有在实机日志里才看得到。现已补齐，并加了两个契约测试。
+
+### Fixed
+
+- **`via_device` 在 HA 2026.9 上会让全部房间实体注册失败。** HA 已删除该参数
+  （改用 `via_device_id`），传旧参数会在设备注册时抛出，结果是中枢级实体正常、
+  **按房间的那一半整批消失**。现在按版本自适应。
+- 删除集成后重装**不会**让 ID 采用新方案：设备 ID 在删除后会被复用，新 ID 仍从旧设备名
+  派生，拼音前缀原样回来。迁移因此是必需的，不是可选的。
+
+### 兼容性
+
+- **HA 2026.2.3 与 2026.9.4 均实测通过**（1161 tests）。
+
+---
+
 ## [0.3.0] — 2026-10-11
 
 > **部署状态：未部署到实机，未经现场验证。**
