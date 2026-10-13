@@ -13,12 +13,46 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import slugify
 
 from .const import DEFAULT_NAME, DOMAIN, MANUFACTURER, MODEL
 from .models import ZoneState
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .coordinator import ClimatePilotCoordinator
+
+
+#: Entity ids use this prefix instead of one derived from the device name.
+#:
+#: Home Assistant's documented behaviour is to build ``entity_id`` from
+#: ``<device name>_<entity name>``, which is a good default: the device name
+#: acts as a source tag keeping entities from different integrations apart.
+#: It produces unusable ids here, because the device name is Chinese and
+#: ``slugify`` can only romanise it - "我的家" becomes "wo_de_jia".
+#:
+#: Renaming the system to ASCII was rejected as the fix. It would tie every
+#: entity id to a user-editable display string, so renaming the system would
+#: rename all 51 entities and break every dashboard and automation referencing
+#: them; and because ``name_by_user`` takes priority over ``name``, anyone
+#: renaming the device in the UI would reintroduce pinyin for entities created
+#: afterwards.
+#:
+#: Pinning the prefix keeps the two concerns apart: the system name stays a
+#: free-text display label, and entity ids stay stable ASCII.
+ENTITY_ID_PREFIX: str = "cp"
+
+
+def entity_id_for(domain: str, key: str) -> str:
+    """Return the stable entity id for ``key`` in ``domain``.
+
+    Deliberately takes no system name: depending on it is exactly the coupling
+    that makes a rename churn every entity id.
+
+    The key is slugified so a key built from a room name (which is user-editable
+    free text and may be Chinese) still yields an ASCII object id. The domain is
+    used verbatim - Home Assistant matches on it exactly.
+    """
+    return f"{domain}.{ENTITY_ID_PREFIX}_{slugify(key)}"
 
 
 def _parent_device_id(hass: Any, identifier: tuple[str, str], config_entry_id: str) -> str | None:
