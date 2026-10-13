@@ -1,7 +1,12 @@
 """Switch platform for ClimatePilot.
 
-One switch per room enables it as the bounded auxiliary heat load (design doc
-5.3).  The switch is only a *permission*: whether the load is actually applied
+Two kinds of switch live here:
+
+* one per room, enabling it as the bounded auxiliary heat load (design doc 5.3);
+* one system-wide heating-season gate, so the integration can be left installed
+  and dormant outside the heating season.
+
+The per-room switch is only a *permission*: whether the load is actually applied
 is decided every cycle by the coordinator, which requires other zones to have a
 real demand, no manual override on this room, and a temperature below the
 configured cap -- so the load can never become the old "current + 2 C" runaway.
@@ -13,8 +18,12 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.switch import SwitchEntity
 
-from .base import ClimatePilotZoneEntity
-from .const import DOMAIN
+from .base import ClimatePilotEntity, ClimatePilotZoneEntity
+from .const import (
+    CONTROL_MODE_OBSERVE,
+    CONTROL_MODE_PAUSED,
+    DOMAIN,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from homeassistant.config_entries import ConfigEntry
@@ -22,6 +31,65 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from .coordinator import ClimatePilotCoordinator
+
+
+def season_to_control_mode(season_on: bool) -> str:
+    """Map the season switch to a control mode.
+
+    ON deliberately selects ``observe`` rather than ``coordinate``. Turning the
+    season on resumes monitoring and suggestions; it must not silently begin
+    writing to the room thermostats, because that skips the review step observe
+    mode exists for and changes behaviour on a live heating system without a
+    fresh confirmation. Reaching ``coordinate`` stays an explicit choice in the
+    control-mode select.
+    """
+    return CONTROL_MODE_OBSERVE if season_on else CONTROL_MODE_PAUSED
+
+
+def control_mode_to_season(mode: str) -> bool:
+    """Derive the switch state from the control mode.
+
+    The switch stores nothing of its own. Two independent flags for the same
+    decision would eventually disagree, and the reader would have no way to tell
+    which one won.
+    """
+    return mode != CONTROL_MODE_PAUSED
+
+
+class HeatingSeasonSwitch(ClimatePilotEntity, SwitchEntity):
+    """Whether the heating season is running.
+
+    Off means "off season": the integration stops coordinating and withdraws its
+    own heat request, but it does not touch the boiler's own power state - the
+    state machine only turns off what it turned on.
+    """
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "heating_season")
+        self._attr_translation_key = "heating_season"
+
+    @property
+    def is_on(self) -> bool:
+        return control_mode_to_season(self.coordinator.control_mode)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_control_mode(season_to_control_mode(True))
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_control_mode(season_to_control_mode(False))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose why the season reads the way it does.
+
+        ``writes_enabled`` is the property that actually gates every write, so
+        showing it next to the switch removes any doubt about whether "season
+        on" means the integration is currently controlling anything.
+        """
+        return {
+            "control_mode": self.coordinator.control_mode,
+            "writes_enabled": self.coordinator.writes_enabled,
+        }
 
 
 class AuxiliaryLoadSwitch(ClimatePilotZoneEntity, SwitchEntity):
@@ -61,6 +129,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up the ClimatePilot switch entities."""
     coordinator: ClimatePilotCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
+
+    entities: list[SwitchEntity] = [HeatingSeasonSwitch(coordinator)]
+    entities.extend(
         AuxiliaryLoadSwitch(coordinator, zone_id) for zone_id in coordinator.zone_ids
     )
+    async_add_entities(entities)
