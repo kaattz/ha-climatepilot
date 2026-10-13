@@ -293,3 +293,83 @@ def test_every_platform_is_covered(entity_id: str, unique_id: str, expected: str
     registry = FakeRegistry([FakeEntry(entity_id, unique_id)])
     assert migrate_entity_ids(registry, ENTRY_ID) == 1
     assert registry.updated == [(entity_id, expected)]
+
+
+def test_a_container_that_yields_entity_id_strings_is_read_correctly() -> None:
+    """The real registry container iterates to **strings**, not entries.
+
+    ``EntityRegistryItems`` maps ``entity_id -> entry``, so iterating it yields
+    entity id strings. Reading ``.entity_id`` off a string finds nothing, and a
+    migration that does so runs, recognises no rows, and renames nothing - all
+    without raising. A fake registry that yields entry objects cannot reproduce
+    that, which is why this case has its own test: it was the real behaviour
+    until an end-to-end run against a booted Home Assistant caught it.
+
+    The supported lookup is tried first, so this pins the fallback for a
+    container exposing only the mapping interface.
+    """
+
+    class MappingContainer(dict):
+        """Behaves like EntityRegistryItems minus the lookup helper."""
+
+    class Registry:
+        def __init__(self, entries: list[FakeEntry]) -> None:
+            self.entities = MappingContainer((e.entity_id, e) for e in entries)
+            self.updated: list[tuple[str, str]] = []
+
+        def async_update_entity(self, entity_id: str, *, new_entity_id: str) -> None:
+            self.updated.append((entity_id, new_entity_id))
+
+    from custom_components.climatepilot.migration import migrate_entity_ids
+
+    registry = Registry(
+        [
+            FakeEntry("sensor.wo_de_jia_heating_state", f"{ENTRY_ID}_heating_state"),
+            FakeEntry("sensor.wo_de_jia_delta_t", f"{ENTRY_ID}_delta_t"),
+        ]
+    )
+
+    assert migrate_entity_ids(registry, ENTRY_ID) == 2, (
+        "iterating the mapping yields entity id strings; reading .entity_id off "
+        "them finds nothing and the migration silently does no work"
+    )
+    assert registry.updated == [
+        ("sensor.wo_de_jia_heating_state", "sensor.cp_heating_state"),
+        ("sensor.wo_de_jia_delta_t", "sensor.cp_delta_t"),
+    ]
+
+
+def test_the_supported_config_entry_lookup_is_preferred() -> None:
+    """On a real registry the config-entry lookup is used, not a full scan.
+
+    ``get_entries_for_config_entry_id`` returns real ``RegistryEntry`` objects
+    already filtered to this entry, so the migration neither misreads strings nor
+    walks other integrations' rows.
+    """
+
+    class Container:
+        """Exposes the supported lookup and nothing iterable."""
+
+        def __init__(self, entries: list[FakeEntry]) -> None:
+            self._entries = entries
+            self.calls: list[str] = []
+
+        def get_entries_for_config_entry_id(self, entry_id: str) -> list[FakeEntry]:
+            self.calls.append(entry_id)
+            return list(self._entries)
+
+    class Registry:
+        def __init__(self, entries: list[FakeEntry]) -> None:
+            self.entities = Container(entries)
+            self.updated: list[tuple[str, str]] = []
+
+        def async_update_entity(self, entity_id: str, *, new_entity_id: str) -> None:
+            self.updated.append((entity_id, new_entity_id))
+
+    from custom_components.climatepilot.migration import migrate_entity_ids
+
+    registry = Registry([FakeEntry("sensor.wo_de_jia_heating_state", f"{ENTRY_ID}_heating_state")])
+
+    assert migrate_entity_ids(registry, ENTRY_ID) == 1
+    assert registry.entities.calls == [ENTRY_ID]
+    assert registry.updated == [("sensor.wo_de_jia_heating_state", "sensor.cp_heating_state")]

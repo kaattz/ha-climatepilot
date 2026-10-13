@@ -1,14 +1,9 @@
 {
   "domain": "climatepilot",
   "name": "ClimatePilot",
-  "codeowners": [
-    "@kaattz"
-  ],
+  "codeowners": ["@kaattz"],
   "config_flow": true,
-  "dependencies": [
-    "climate",
-    "sensor"
-  ],
+  "dependencies": ["climate", "sensor"],
   "documentation": "https://github.com/kaattz/ha-climatepilot",
   "integration_type": "hub",
   "iot_class": "local_polling",
