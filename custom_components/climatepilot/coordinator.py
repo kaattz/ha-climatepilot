@@ -44,9 +44,11 @@ from .const import (
     CONF_BURNER_STATE_ENTITY,
     CONF_CONDENSING_RETURN_C,
     CONF_CONTROL_MODE,
+    CONF_DEGREE_DAY_BASE_C,
     CONF_DELTA_T_HEALTHY_MAX,
     CONF_DELTA_T_HEALTHY_MIN,
     CONF_DELTA_T_WINDOW_SECONDS,
+    CONF_GAS_METER_ENTITY,
     CONF_HEAT_SOURCE,
     CONF_OUTDOOR_STALE_MINUTES,
     CONF_OUTDOOR_TEMP_ENTITY,
@@ -66,6 +68,7 @@ from .const import (
     CONTROL_MODE_COORDINATE,
     CONTROL_MODE_OBSERVE,
     DEFAULT_CONDENSING_RETURN_C,
+    DEFAULT_DEGREE_DAY_BASE_C,
     DEFAULT_DELTA_T_HEALTHY_MAX,
     DEFAULT_DELTA_T_HEALTHY_MIN,
     DEFAULT_DELTA_T_WINDOW,
@@ -96,6 +99,7 @@ from .const import (
 )
 from .delta_t_diagnostics import DeltaTDiagnostics, DeltaTReport
 from .diagnostics_engine import BurnerStats
+from .energy_monitor import EnergyMonitor
 from .heat_source import (
     BoilerCapabilities,
     HeatSourceConfig,
@@ -200,6 +204,21 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.return_probe_entity: str | None = options.get(CONF_RETURN_TEMP_ENTITY)
         self.supply_probe_entity: str | None = options.get(CONF_SUPPLY_PROBE_ENTITY)
+
+        # --- V0.5 gas / degree-day metering ------------------------------
+        #
+        # Strictly a read-only instrument. It observes the gas meter and the
+        # outdoor temperature and never feeds back into arbitration, the state
+        # machine, or any write - so nothing here can influence the boiler.
+        #
+        # ``gas_meter_entity`` is stored as given even when the entity does not
+        # exist, but :attr:`energy_enabled` additionally requires it to resolve.
+        # Keeping the raw value means a temporarily missing sensor does not erase
+        # the user's configuration.
+        self.gas_meter_entity: str | None = options.get(CONF_GAS_METER_ENTITY) or None
+        self.energy_monitor = EnergyMonitor(
+            base_c=float(options.get(CONF_DEGREE_DAY_BASE_C, DEFAULT_DEGREE_DAY_BASE_C))
+        )
 
         self.store = ClimatePilotStore(hass, self.system_id)
 
@@ -749,6 +768,11 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.comfort = self.comfort_analyser.verdicts(now)
 
         self._async_update_v03_diagnostics(now)
+        # V0.5 metering rides the same audit tick. No separate timer: 15 minutes
+        # is ample resolution for an integral over days, and one fewer scheduled
+        # callback is one fewer thing that can misbehave.
+        if self.energy_enabled:
+            self.note_energy(now)
 
     def _async_update_v03_diagnostics(self, now: datetime) -> None:
         """Refresh the external pipe-probe diagnostics.
@@ -838,6 +862,59 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @property
     def probes_configured(self) -> bool:
         return bool(self.supply_probe_entity or self.return_probe_entity)
+
+    # ------------------------------------------------------------------
+    # V0.5 gas / degree-day metering (read-only)
+    # ------------------------------------------------------------------
+    @property
+    def energy_enabled(self) -> bool:
+        """Whether the gas-metering entities should exist at all.
+
+        Requires both a configured meter **and** that entity actually resolving.
+        A stale entity id - the sensor was renamed or deleted after the flow
+        accepted it - would otherwise create six permanently-unknown sensors with
+        no explanation of why.
+        """
+        return bool(self.gas_meter_entity and self.hass.states.get(self.gas_meter_entity))
+
+    def note_energy(self, now: datetime) -> None:
+        """Feed one observation to the energy monitor.
+
+        Called once per audit cycle. Read-only by construction: it reads two
+        entities and updates an in-memory accumulator, and there is no path from
+        here to a service call.
+        """
+        gas_total: float | None = None
+        if self.gas_meter_entity:
+            state = self.hass.states.get(self.gas_meter_entity)
+            # The sentinel check overlaps with the ``float`` below and a test
+            # cannot currently tell them apart: ``float`` already rejects the
+            # strings "unavailable" and "unknown", so deleting this line changes no
+            # behaviour today. It stays because it states the intent directly rather
+            # than relying on an exception for control flow, and because a state
+            # string that *does* parse - "nan", "inf" - would otherwise reach the
+            # engine. Those are caught there by ``_finite``, so the two defences
+            # overlap deliberately rather than by accident.
+            if state is not None and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                try:
+                    gas_total = float(state.state)
+                except (TypeError, ValueError):
+                    gas_total = None
+
+        # Reuses the weather reading rather than reading the entity again, so an
+        # unavailable or stale outdoor sensor is handled by exactly the same rule
+        # the rest of the integration applies.
+        outdoor = self._outdoor_reading(now).value
+
+        self.energy_monitor.note(now, outdoor_temp=outdoor, gas_total=gas_total)
+
+    def energy_snapshot(self) -> dict[str, Any]:
+        """Current gas and degree-day readings, for the sensor platform."""
+        return self.energy_monitor.snapshot(self._now())
+
+    def _restore_energy(self, data: Any) -> None:
+        """Restore the accumulator, tolerating anything the store hands back."""
+        self.energy_monitor.restore(data if isinstance(data, dict) else None)
 
     @property
     def cycling_quality(self) -> str:
@@ -958,6 +1035,10 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.comfort_analyser.restore(data.get("comfort"))
         self.probe_monitor.restore(data.get("probes"))
         self.delta_t_engine.restore(data.get("delta_t"))
+        # V0.5 metering. A restart a few times a day is normal, and losing the
+        # day's progress each time would make the daily figure depend on uptime
+        # rather than on the boiler.
+        self._restore_energy(data.get("energy"))
         _LOGGER.info("Restored ClimatePilot state for %d zones", len(stored_zones))
 
     def _async_schedule_save(self) -> None:
@@ -980,6 +1061,7 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "comfort": self.comfort_analyser.snapshot(),
             "probes": self.probe_monitor.snapshot(),
             "delta_t": self.delta_t_engine.snapshot(),
+            "energy": self.energy_monitor.snapshot_persist(),
             "control_mode": self.control_mode,
         }
 
