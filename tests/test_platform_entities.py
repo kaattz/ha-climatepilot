@@ -141,6 +141,24 @@ T0 = datetime(2026, 2, 3, 12, 0, tzinfo=UTC)
 #: default of ``None`` would make the meaningful case unrepresentable.
 UNSET: object = object()
 
+#: What ``energy_snapshot()`` returns for a configured meter. Realistic rather than
+#: empty so the six sensors exercise the same path they do in production - and
+#: ``None`` is included on purpose, because "no reading yet" is the state every one
+#: of them starts in and the one most likely to be mishandled.
+_ENERGY_READINGS: dict[str, object] = {
+    "gas_today": 4.25,
+    "gas_yesterday": 10.75,
+    "gas_this_month": 128.5,
+    "gas_previous_month": None,
+    "degree_days_today": 6.5,
+    "degree_days_this_month": 84.25,
+    "gas_per_degree_day": 1.53,
+    "coverage_today": 1.0,
+    "degree_days_trusted": True,
+    "meter_reset_detected": False,
+    "base_c": 15.5,
+}
+
 ZONES = {
     "living_room": ("climate.livingroom_floorheating", "客厅"),
     "master_bedroom": ("climate.master_bedroom_floorheating", "主卧"),
@@ -573,6 +591,7 @@ class FakeCoordinator:
         delta_t: object = UNSET,
         probe_fault: bool = False,
         probes_configured: bool = True,
+        energy_enabled: bool = False,
     ) -> None:
         self.system_id = ENTRY_ID
         self.name = "智暖领航"
@@ -654,6 +673,14 @@ class FakeCoordinator:
         self.delta_t = FakeDeltaTReport() if delta_t is UNSET else delta_t
         self.probe_fault = probe_fault
         self.probes_configured = probes_configured
+
+        # --- V0.5 surfaces (gas metering, read-only) ----------------------
+        # ``energy_enabled`` decides whether the six sensors are created at all, so
+        # the default is off: a fake that silently enabled them would make the
+        # count assertions below pass for the wrong reason.
+        self.energy_enabled = energy_enabled
+        self.gas_meter_entity = "sensor.gas_meter" if energy_enabled else None
+        self.energy_snapshot = Mock(return_value=dict(_ENERGY_READINGS))
 
         # Commands the platform layer is allowed to call.
         self.async_set_control_mode = AsyncMock()
@@ -769,6 +796,15 @@ EXPECTED_TOTAL = sum(
     system + len(ZONES) * per_zone for system, per_zone in EXPECTED_PER_PLATFORM.values()
 )
 
+#: The six V0.5 gas/degree-day sensors, which exist only when a gas meter is
+#: configured. Kept out of ``EXPECTED_PER_PLATFORM`` because that table describes
+#: what every installation always has; these are conditional, and folding them in
+#: would assert six entities that most systems never create.
+#:
+#: Not per-zone: consumption and degree-days describe the building and the weather,
+#: so the count does not scale with the number of rooms.
+V05_ENERGY_SENSORS = 6
+
 
 def build_platform_entities(coordinator: FakeCoordinator) -> dict[str, list]:
     """Build every entity exactly the way each platform's setup does."""
@@ -879,11 +915,18 @@ def test_expected_counts_agree_with_strings_json() -> None:
     entry per ``translation_key``, so a per-zone key contributes once no matter
     how many rooms exist. Both axes of ``EXPECTED_PER_PLATFORM`` therefore
     contribute once each.
+
+    The six V0.5 gas/degree-day sensors are added explicitly. They are conditional
+    - created only when a meter is configured - so they cannot live in
+    ``EXPECTED_PER_PLATFORM``, which describes what every installation always has.
+    But they do have translation keys, so this comparison must still account for
+    them or it would report drift that is not there.
     """
     declared = {
         platform: system_level + per_zone
         for platform, (system_level, per_zone) in EXPECTED_PER_PLATFORM.items()
     }
+    declared["sensor"] += V05_ENERGY_SENSORS
     documented = {
         platform: len(keys)
         for platform, keys in ENTITY_STRINGS.items()

@@ -33,6 +33,7 @@ from custom_components.climatepilot.const import (
     CONF_BOILER_ENTITY,
     CONF_BURNER_STATE_ENTITY,
     CONF_CONTROL_MODE,
+    CONF_GAS_METER_ENTITY,
     CONF_HEAT_SOURCE,
     CONF_OUTDOOR_TEMP_ENTITY,
     CONF_SYSTEM_NAME,
@@ -110,9 +111,30 @@ V02_ADDED = (V02_SYSTEM_SENSORS - V01_SYSTEM_SENSORS) + ZONE_COUNT * (
 )
 V03_ADDED = (V03_SYSTEM_SENSORS - V02_SYSTEM_SENSORS) + (V03_SYSTEM_BINARY - V02_SYSTEM_BINARY)
 V04_ADDED = V04_SYSTEM_SWITCH
+
+#: V0.5 adds six system-level sensors, and they are **conditional**: they exist only
+#: when a gas meter is configured and resolvable (``coordinator.energy_enabled``).
+#:
+#: They are therefore tracked outside ``EXPECTED_PER_PLATFORM``, which describes
+#: what every installation always has. Folding them in would force the always-on
+#: count to include entities most systems never create, and the dashboard and
+#: translation contracts that read those numbers compare against *keys*, not
+#: entities - a conditional entity still has a key.
+#:
+#: Not per-zone: gas and degree-days are properties of the building and the weather,
+#: so the count does not scale with the number of rooms.
+V05_SYSTEM_SENSORS = 6
+V05_ADDED = V05_SYSTEM_SENSORS
+
+#: What a three-zone system exposes with no gas meter configured - the number the
+#: platform-setup tests assert against, and the total that must not change for
+#: installations that do not use this feature.
 EXPECTED_ENTITY_TOTAL = sum(
     system + ZONE_COUNT * per_zone for system, per_zone in EXPECTED_PER_PLATFORM.values()
 )
+
+#: The same total with the gas feature switched on.
+EXPECTED_ENTITY_TOTAL_WITH_ENERGY = EXPECTED_ENTITY_TOTAL + V05_SYSTEM_SENSORS
 
 
 @pytest.fixture()
@@ -461,6 +483,50 @@ async def test_v02_entities_are_registered(hass):
         assert len(matches) == ZONE_COUNT, f"{suffix}: expected {ZONE_COUNT}, got {matches}"
 
 
+@pytest.mark.asyncio
+async def test_gas_sensors_register_when_a_meter_is_configured(hass) -> None:
+    """With a meter configured, the six V0.5 sensors really appear in the registry.
+
+    This is the other half of the exclusion in
+    :func:`test_dashboard_entity_ids_exist_in_the_registry`. That test boots a
+    gas-free installation, so it cannot see these entities and skips them by name;
+    that is only safe if something else proves they exist, with these exact ids,
+    when a meter *is* set. This is that something.
+
+    Asserted against a booted registry rather than a derived string, so the id rule
+    cannot be wrong on both sides at once.
+    """
+    hass.states.async_set("sensor.gas_meter", "1747.15")
+    await setup_entry(hass, **{CONF_GAS_METER_ENTITY: "sensor.gas_meter"})
+    real = registered_entities(hass)
+
+    expected = {
+        "sensor.cp_gas_today",
+        "sensor.cp_gas_yesterday",
+        "sensor.cp_gas_this_month",
+        "sensor.cp_degree_days_today",
+        "sensor.cp_degree_days_this_month",
+        "sensor.cp_gas_per_degree_day",
+    }
+    missing = sorted(expected - real)
+    assert not missing, f"gas sensors were not registered: {missing}"
+
+
+@pytest.mark.asyncio
+async def test_gas_sensors_are_absent_without_a_meter(hass) -> None:
+    """And with no meter they must not exist at all.
+
+    Six permanently-unknown entities would be worse than none: they would appear in
+    the registry, in search, and on a dashboard as broken, for a feature the user
+    never asked for.
+    """
+    await setup_entry(hass)
+    real = registered_entities(hass)
+
+    unexpected = sorted(eid for eid in real if "gas_" in eid or "degree_day" in eid)
+    assert not unexpected, f"gas sensors created without a meter: {unexpected}"
+
+
 async def test_dashboard_entity_ids_exist_in_the_registry(hass):
     """The shipped dashboard must resolve against the *real* registry.
 
@@ -506,7 +572,25 @@ async def test_dashboard_entity_ids_exist_in_the_registry(hass):
     # The KNX thermostats are the user's entities, created by their own
     # integration, so they are legitimately absent from *our* registry.
     user_owned = {"climate.livingroom_floorheating", "climate.master_bedroom_floorheating"}
-    ours = referenced - user_owned
+    # The V0.5 gas/degree-day sensors are conditional: the fixture configures no
+    # gas meter, so the platform correctly creates none of them. They are listed
+    # here rather than removed from the dashboard because the dashboard is shared
+    # by every installation, and an installation that *does* configure a meter must
+    # find the cards already present.
+    #
+    # Excluding them by name keeps this test's authority intact: every other id in
+    # the dashboard is still checked against a booted registry. The alternative -
+    # booting a second fixture with a meter - would be checked separately in
+    # test_gas_sensors.py, which asserts these six ids directly.
+    conditional = {
+        "sensor.cp_gas_today",
+        "sensor.cp_gas_yesterday",
+        "sensor.cp_gas_this_month",
+        "sensor.cp_degree_days_today",
+        "sensor.cp_degree_days_this_month",
+        "sensor.cp_gas_per_degree_day",
+    }
+    ours = referenced - user_owned - conditional
 
     unresolved = sorted(ours - real)
     assert not unresolved, (

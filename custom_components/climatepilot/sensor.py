@@ -62,6 +62,9 @@ from .const import (
     CONDENSING_UNLIKELY,
     DEFAULT_COMBINATION_WINDOW,
     DOMAIN,
+    ENERGY_UNIT_DEGREE_DAYS,
+    ENERGY_UNIT_GAS,
+    ENERGY_UNIT_GAS_PER_DEGREE_DAY,
     FEEDBACK_VALID,
     FSM_STATES,
     HYDRAULIC_HIGH_FLOW,
@@ -1060,6 +1063,203 @@ class ComfortAdviceSensor(ClimatePilotZoneEntity, SensorEntity):
 
 
 # ---------------------------------------------------------------------------
+# V0.5 gas and degree-days
+#
+# An instrument, not a verdict. These entities report what the meter and the
+# outdoor sensor actually did; none of them claims the integration saved anything,
+# and none of them can influence the boiler - there is no write path from here.
+# ---------------------------------------------------------------------------
+
+
+class _EnergySensor(_SystemDiagnosticSensor):
+    """Shared behaviour for the gas/degree-day readings.
+
+    Two things are handled once, because both are load-bearing:
+
+    ``native_value`` returns whatever the engine produced, including ``None``.
+    ``None`` reaches Home Assistant as "unknown", which is what a missing reading
+    means. Substituting 0 would claim a measurement that was never made.
+
+    ``_attr_state_class`` is set on each subclass. Without it the recorder purges
+    the history after its retention window - 30 days on the reference installation -
+    so there would be nothing left to compare month over month, which is the entire
+    purpose of the feature.
+    """
+
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: ClimatePilotCoordinator, key: str) -> None:
+        super().__init__(coordinator, key)
+
+    def _reading(self, name: str) -> Any:
+        return self.coordinator.energy_snapshot().get(name)
+
+    @property
+    def _scope_attributes(self) -> dict[str, Any]:
+        """Declare that these numbers are not heating-only.
+
+        The gas meter on the reference installation serves the boiler, domestic
+        hot water and the hob. Without this stated on the entity itself, a figure
+        like ``m3 per degree-day`` reads as boiler efficiency when it also contains
+        cooking. Mirrors the V0.3 convention that put an explicit
+        ``is_power_measurement = False`` on the probe entities.
+        """
+        return {"scope": "whole_house", "includes_dhw_and_cooking": True}
+
+
+class GasTodaySensor(_EnergySensor):
+    """Gas used since midnight, or ``None`` if no reading was available."""
+
+    _attr_translation_key = "gas_today"
+    _attr_native_unit_of_measurement = ENERGY_UNIT_GAS
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "gas_today")
+
+    @property
+    def native_value(self) -> float | None:
+        return self._reading("gas_today")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {**self._scope_attributes, "meter_entity": self.coordinator.gas_meter_entity}
+
+
+class GasYesterdaySensor(_EnergySensor):
+    """Gas used over the last complete day.
+
+    ``measurement`` rather than ``total_increasing``: this is a finished daily
+    total that is replaced each midnight, so a running-sum interpretation would
+    integrate the daily figures and report a value that grows without bound.
+    """
+
+    _attr_translation_key = "gas_yesterday"
+    _attr_native_unit_of_measurement = ENERGY_UNIT_GAS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "gas_yesterday")
+
+    @property
+    def native_value(self) -> float | None:
+        return self._reading("gas_yesterday")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self._scope_attributes
+
+
+class GasThisMonthSensor(_EnergySensor):
+    """Gas used since the first of the month."""
+
+    _attr_translation_key = "gas_this_month"
+    _attr_native_unit_of_measurement = ENERGY_UNIT_GAS
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "gas_this_month")
+
+    @property
+    def native_value(self) -> float | None:
+        return self._reading("gas_this_month")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {**self._scope_attributes, "previous_month": self._reading("gas_previous_month")}
+
+
+class DegreeDaysTodaySensor(_EnergySensor):
+    """Heating degree-days accumulated since midnight.
+
+    This is a temperature difference integrated over time, not a temperature, so no
+    device class is set: ``temperature`` would trigger Home Assistant's unit
+    conversion and turn it into a nonsense figure.
+    """
+
+    _attr_translation_key = "degree_days_today"
+    _attr_native_unit_of_measurement = ENERGY_UNIT_DEGREE_DAYS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "degree_days_today")
+
+    @property
+    def native_value(self) -> float | None:
+        return self._reading("degree_days_today")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Publish the base temperature and how much of the day was observed.
+
+        The base is a convention - 15.5 here, 18.3 in US practice - so the reading
+        cannot be interpreted without it. Coverage qualifies the number: a day with
+        a sensor outage is a real measurement of a shorter period, and saying so is
+        better than hiding it or silently trusting it.
+        """
+        return {
+            "base_c": self._reading("base_c"),
+            "coverage": self._reading("coverage_today"),
+            "trusted": self._reading("degree_days_trusted"),
+        }
+
+
+class DegreeDaysThisMonthSensor(_EnergySensor):
+    """Heating degree-days accumulated since the first of the month."""
+
+    _attr_translation_key = "degree_days_this_month"
+    _attr_native_unit_of_measurement = ENERGY_UNIT_DEGREE_DAYS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "degree_days_this_month")
+
+    @property
+    def native_value(self) -> float | None:
+        return self._reading("degree_days_this_month")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"base_c": self._reading("base_c")}
+
+
+class GasPerDegreeDaySensor(_EnergySensor):
+    """Gas used per degree-day this month: a comparable figure, not an efficiency.
+
+    This is the number a user can watch across months to see whether the house is
+    using more or less gas for the same weather. It is deliberately not called an
+    efficiency: the meter is whole-house, so the value also contains hot water and
+    cooking, and those do not scale with outdoor temperature at all.
+
+    ``None`` when there are no degree-days - dividing by zero would report either
+    perfect efficiency (0) or an unusable infinity.
+    """
+
+    _attr_translation_key = "gas_per_degree_day"
+    _attr_native_unit_of_measurement = ENERGY_UNIT_GAS_PER_DEGREE_DAY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: ClimatePilotCoordinator) -> None:
+        super().__init__(coordinator, "gas_per_degree_day")
+
+    @property
+    def native_value(self) -> float | None:
+        return self._reading("gas_per_degree_day")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            **self._scope_attributes,
+            # Mirrors `is_power_measurement = False` on the V0.3 probe entities: an
+            # explicit marker so no consumer can mistake this for boiler performance.
+            "is_efficiency_measurement": False,
+            "base_c": self._reading("base_c"),
+            "gas_this_month": self._reading("gas_this_month"),
+            "degree_days_this_month": self._reading("degree_days_this_month"),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Platform setup
 # ---------------------------------------------------------------------------
 
@@ -1102,6 +1302,21 @@ async def async_setup_entry(
                 OverrideRemainingSensor(coordinator, zone_id),
                 ComfortVerdictSensor(coordinator, zone_id),
                 ComfortAdviceSensor(coordinator, zone_id),
+            )
+        )
+
+    # V0.5 gas metering is opt-in: with no meter configured the six entities are
+    # not created at all, so a system without one sees no permanently-unknown
+    # sensors and pays nothing for the feature's existence.
+    if coordinator.energy_enabled:
+        entities.extend(
+            (
+                GasTodaySensor(coordinator),
+                GasYesterdaySensor(coordinator),
+                GasThisMonthSensor(coordinator),
+                DegreeDaysTodaySensor(coordinator),
+                DegreeDaysThisMonthSensor(coordinator),
+                GasPerDegreeDaySensor(coordinator),
             )
         )
 

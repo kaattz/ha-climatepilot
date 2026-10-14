@@ -270,6 +270,12 @@
       "active_zones": {
         "name": "需求分区数"
       },
+            "gas_today": { "name": "今日用气量" },
+      "gas_yesterday": { "name": "昨日用气量" },
+      "gas_this_month": { "name": "本月用气量" },
+      "degree_days_today": { "name": "今日度日数" },
+      "degree_days_this_month": { "name": "本月度日数" },
+      "gas_per_degree_day": { "name": "每度日用气量（本月）" },
       "suggested_supply_temp": {
         "name": "建议供水温度"
       },

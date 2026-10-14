@@ -107,6 +107,54 @@ views:
             name: 室外温度
 
       # ------------------------------------------------------------------
+      # 1b. Gas and degree-days (V0.5, optional - only if a meter is set)
+      #
+      #      These six entities exist only when a gas meter is configured in
+      #      the options, so this group is empty on an installation without
+      #      one. Delete the whole block in that case.
+      #
+      #      Read them as a METER, not as proof of savings. The meter is
+      #      whole-house: it also feeds hot water and the hob, so these
+      #      figures are not heating consumption, and `per degree-day` is a
+      #      figure to compare across months rather than a boiler efficiency.
+      #      Degree-days normalise for how cold the period was, which is what
+      #      makes two months with different weather comparable at all.
+      # ------------------------------------------------------------------
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: 燃气与度日数
+            heading_style: title
+            icon: mdi:fire
+
+          - type: tile
+            entity: sensor.cp_gas_today
+            name: 今日用气量
+
+          - type: tile
+            entity: sensor.cp_gas_yesterday
+            name: 昨日用气量
+
+          - type: tile
+            entity: sensor.cp_gas_this_month
+            name: 本月用气量
+
+          - type: tile
+            entity: sensor.cp_degree_days_today
+            name: 今日度日数
+
+          - type: tile
+            entity: sensor.cp_degree_days_this_month
+            name: 本月度日数
+
+          # The comparable figure across months. Its attributes carry
+          # `is_efficiency_measurement: false` and `scope: whole_house`.
+          - type: tile
+            entity: sensor.cp_gas_per_degree_day
+            name: 每度日用气量（本月）
+
+      # ------------------------------------------------------------------
       # 2. Demand combinations - which rooms ask for heat together
       # ------------------------------------------------------------------
       - type: grid

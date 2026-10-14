@@ -242,6 +242,12 @@
     "sensor": {
       "heating_state": {"name": "Heating state", "state": {"observe": "Observe", "idle": "Idle", "prepare": "Prepare", "heating": "Heating", "satisfied": "Satisfied", "degraded": "Degraded"}},
       "active_zones": {"name": "Zones demanding heat"},
+            "gas_today": { "name": "Gas used today" },
+      "gas_yesterday": { "name": "Gas used yesterday" },
+      "gas_this_month": { "name": "Gas used this month" },
+      "degree_days_today": { "name": "Degree-days today" },
+      "degree_days_this_month": { "name": "Degree-days this month" },
+      "gas_per_degree_day": { "name": "Gas per degree-day (this month)" },
       "suggested_supply_temp": {"name": "Suggested supply temperature"},
       "outdoor_temperature": {"name": "Outdoor temperature"},
       "supply_temperature": {"name": "Supply temperature"},
