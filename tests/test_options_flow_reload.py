@@ -120,16 +120,23 @@ def test_the_home_assistant_guard_is_still_present() -> None:
     If a future release drops the restriction these assertions become vacuous, and
     this test says so rather than letting them pass for the wrong reason.
 
-    Searched across the module rather than by naming the class: the guard moved
-    between releases - it is on ``OptionsFlowManager`` in 2026.2 and on
-    ``ConfigEntriesFlowManager`` in 2026.9 - and pinning either name would make this
-    fail on the other version for no useful reason.
+    Matched on the *condition*, not on the message text, and across the module rather
+    than by naming a class. Both vary by release: the guard sits on
+    ``OptionsFlowManager`` in 2026.2 and on ``ConfigEntriesFlowManager`` in 2026.9, and
+    the message is one string literal in the older version but split across two
+    adjacent literals in the newer one - so searching for the sentence fails on
+    2026.9 even though the behaviour is identical. That is exactly how this test first
+    passed on one version and failed on the other.
     """
     import homeassistant.config_entries as ce
 
     source = inspect.getsource(ce)
-    assert "should not be used with OptionsFlowWithReload" in source
-    assert "entry.update_listeners" in source
+    guard = "if automatic_reload and entry.update_listeners"
+    assert guard in source, (
+        "HA no longer forbids update listeners alongside OptionsFlowWithReload; "
+        "the assertions in this module may now be vacuous"
+    )
+    assert "raise ValueError(" in source.split(guard)[1][:200]
 
 
 # ---------------------------------------------------------------------------
