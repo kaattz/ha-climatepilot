@@ -11,6 +11,43 @@ ClimatePilot（智暖领航）的全部重要变更都记录在此。
 
 （无）
 
+### Fixed
+
+- **保存选项必定报错，且自选项流程写出以来一直如此。**
+
+  ```
+  ValueError: Config entry update listeners should not be used with
+  OptionsFlowWithReload
+  ```
+
+  选项流程继承自 `OptionsFlowWithReload`（保存后自动重载配置项），而
+  `async_setup_entry` 又注册了一个 update listener，其**唯一作用也是重载配置项**。
+  HA **禁止两者并用**（listener 会导致一次保存触发两次重载），检查位于
+  `async_finish_flow`，因此**每一次保存都会抛异常**。
+
+  两者是纯重复，已删除 listener（保留自动重载 —— 它才是让保存无需重启就生效的机制）。
+
+  **为什么 1243 个测试都没发现**：现有测试的验证对象是流程自身的各个 step，而检查在
+  流程管理器的 `async_finish_flow` 里，单元测试**永远不会走到那里**。这个流程此前在
+  实机上从未成功保存过一次。任何测试写得再仔细都找不到它 —— 只有真的按下"保存"才会。
+
+  已补充结构化回归测试：整合包内**不得出现任何 `add_update_listener` 调用**
+  （从 AST 解析，因为解释性注释里就引用了这个名字）、流程仍继承自动重载基类、
+  以及一条"HA 的禁令仍然存在"的检查，防止上述断言悄悄变成空转。
+
+### 实机验证
+
+- 已部署到实机（HAOS 18.3、HA 2026.9.4、3 个房间）并启用：
+  `gas_meter_entity: sensor.gas_meter`、基准 15.5 °C。
+- 6 个实体全部注册，实体总数 **65 → 71**，原有实体无一丢失。
+- 单位与 `state_class` 实测正确：`m³` / `total_increasing`、`°C·d` / `measurement`、
+  `m³/°C·d` / `measurement`；口径属性（`scope: whole_house`、
+  `is_efficiency_measurement: false`）均已到位。
+- **读数当前为 0，这是正确的**：室外 26 °C 高于 15.5 °C 基准，
+  `max(0, 15.5 − 26) = 0`，不产生采暖度日，当天也无采暖用气。
+  `coverage` 随观察时间上升并如实标注"本日仅被观察一小部分"。
+  **有意义的读数要等天冷、锅炉开始采暖之后。**
+
 ---
 
 ## [0.5.0] — 2026-10-14
