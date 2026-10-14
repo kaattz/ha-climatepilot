@@ -143,7 +143,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _async_register_services(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    # No update listener here, deliberately.
+    #
+    # The options flow derives from ``OptionsFlowWithReload``, which reloads the
+    # entry itself when options change. Home Assistant **forbids** combining the
+    # two: ``async_finish_flow`` raises
+    #
+    #     ValueError: Config entry update listeners should not be used with
+    #     OptionsFlowWithReload
+    #
+    # whenever an automatic-reload flow finishes on an entry that has a listener.
+    # That is what a listener would otherwise cause - two reloads for one save -
+    # so the two mechanisms are alternatives, not complements.
+    #
+    # This was a real, shipped defect: the options flow raised on save and had
+    # done since it was written. Unit tests call the flow directly and so never
+    # reach ``async_finish_flow``, which is where the check lives; only saving on
+    # a live system surfaced it.
     return True
 
 
@@ -230,11 +246,6 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     _LOGGER.info("Migrated ClimatePilot entry %s to version 1", entry.entry_id)
     return True
-
-
-async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload the entry when its options change."""
-    await hass.config_entries.async_reload(entry.entry_id)
 
 
 # ---------------------------------------------------------------------------
