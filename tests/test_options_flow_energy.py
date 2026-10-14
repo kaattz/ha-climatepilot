@@ -10,13 +10,25 @@ driven" - and mixing them would make an already long form harder to read.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
-import voluptuous as vol
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_platform_entities import _schema_invalid_class
 
 from custom_components.climatepilot import const as c
 from custom_components.climatepilot import options_flow as of
+
+#: Every schema-rejection class this process may raise. Home Assistant 2026.9
+#: installs probatio as ``voluptuous`` at import, and depending on import order both
+#: libraries' ``MultipleInvalid`` classes can be reachable and unrelated - so
+#: asserting one of them by name makes the test pass or fail by file ordering.
+#: Reused from test_platform_entities rather than reimplemented, so the two cannot
+#: disagree about which classes count.
+SCHEMA_INVALID = _schema_invalid_class()
 
 ROOT = Path(__file__).resolve().parents[1]
 STRINGS = ROOT / "custom_components" / "climatepilot" / "strings.json"
@@ -169,17 +181,32 @@ def test_a_blank_gas_meter_entity_means_off() -> None:
     without editing storage.
 
     "Blank" is ``None``, which is what the entity picker submits when nothing is
-    selected. An empty string is rejected, and deliberately so: measured against
-    the six other optional entity fields in this integration, every one of them
-    accepts ``None`` and rejects ``""``. Matching that keeps this field behaving
-    like the rest rather than introducing a one-off rule.
+    selected; an omitted field is equivalent. An empty string is rejected, and
+    deliberately so: measured against the six other optional entity fields in this
+    integration, every one of them accepts ``None`` and rejects ``""``. Matching
+    that keeps this field behaving like the rest rather than introducing a one-off
+    rule.
+
+    Asserted by validating through the schema rather than by reaching into the
+    validator's attributes. Home Assistant 2026.9 replaces voluptuous with probatio
+    at import, and the two implementations expose different internals - the
+    behaviour is identical, so testing the behaviour keeps this passing on both.
     """
-    _, wrapper = _field_for(c.CONF_GAS_METER_ENTITY)
-    inner = wrapper.schema.schema[c.CONF_GAS_METER_ENTITY]
-    assert inner(None) is None
-    assert inner("sensor.gas_meter") == "sensor.gas_meter"
-    with pytest.raises(vol.Invalid):
-        inner("")
+    schema = of.energy_schema({})
+    base = {c.CONF_DEGREE_DAY_BASE_C: 15.5}
+
+    assert schema({c.CONF_GAS_METER_ENTITY: None, **base})[c.CONF_GAS_METER_ENTITY] is None
+    # An omitted optional field is absent from the validated output rather than
+    # present as None - the flow reads it with ``.get()``, so either shape means
+    # "off". Asserted as absence because that is what actually comes back on both
+    # Home Assistant versions.
+    assert c.CONF_GAS_METER_ENTITY not in schema(base)
+
+    result = schema({c.CONF_GAS_METER_ENTITY: "sensor.gas_meter", **base})
+    assert result[c.CONF_GAS_METER_ENTITY] == "sensor.gas_meter"
+
+    with pytest.raises(SCHEMA_INVALID):
+        schema({c.CONF_GAS_METER_ENTITY: "", **base})
 
 
 def test_the_blank_handling_matches_the_other_optional_entity_fields() -> None:
@@ -187,20 +214,18 @@ def test_the_blank_handling_matches_the_other_optional_entity_fields() -> None:
 
     If a future change teaches the other optional entity fields to accept ``""``,
     this test fails and the divergence gets noticed instead of the two behaviours
-    drifting apart silently.
+    drifting apart silently - which is the failure mode that would make the field
+    surprising rather than wrong.
     """
     boiler = of.boiler_schema({})
-    others = []
-    for key in ("burner_state_entity", "return_temp_entity", "supply_probe_entity"):
-        for marker, value in boiler.schema.items():
-            if str(marker) == key:
-                others.append(value.schema.schema[key])
-    assert others, "expected to find the other optional entity fields"
+    base = {"boiler_entity": "climate.boiler"}
 
-    for validator in others:
-        assert validator(None) is None
-        with pytest.raises(vol.Invalid):
-            validator("")
+    for key in ("burner_state_entity", "return_temp_entity", "supply_probe_entity"):
+        # Accepts None...
+        assert boiler({**base, key: None})[key] is None
+        # ...and rejects the empty string, exactly as the gas meter field does.
+        with pytest.raises(SCHEMA_INVALID):
+            boiler({**base, key: ""})
 
 
 def test_the_base_temperature_is_validated_to_a_sane_range() -> None:
