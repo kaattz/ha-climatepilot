@@ -185,6 +185,67 @@ DEGRADED  通讯异常 / 状态不明 → 停止新写入，人工接管
 - 手动覆盖期间**不生效**；
 - **它不是锅炉最小流量的安全保证** —— 客厅阀门关闭时仍必须有水力保障。
 
+### 5.4 让室外温度进入长期统计（V0.5 用气分析的前提）
+
+**背景。** `recorder.purge_keep_days`（本机 30 天）到期后会清除明细数据。只有带
+`state_class` 的实体才会另存一份**永久**的长期统计。和风天气集成创建的
+`sensor.heweather_outside_temperature` **没有** `state_class`，因此：
+
+- `sensor.gas_meter` 永久保留（它本来就是 `total_increasing`）；
+- 但**解释它的室外温度会在 30 天后被清除**。
+
+结果是过一段时间后，你会只剩一堆无法解释的燃气数字 —— 而
+`sensor.cp_gas_per_degree_day` 正是靠室外温度算出来的。
+
+**做法。** 在 **`packages/heweather_sensors.yaml`** 的 `homeassistant: customize:` 段
+（该文件本来就负责这两个天气传感器的定制）追加：
+
+```yaml
+    sensor.heweather_outside_temperature:
+      state_class: measurement
+      device_class: temperature
+```
+
+**为什么是 `customize:` 而不是改集成：** 该实体属于 HACS 的 `heweather` 集成，
+改它的源码会在下次更新时被覆盖。
+
+**为什么 `customize:` 能生效：** customize 的值会合并进 **state attributes**
+（`helpers/entity.py` 的 `attr |= custom`），而统计模块正是从 state attributes 读取
+`state_class`（`components/sensor/recorder.py` 的 `state.attributes.get(...)`）。
+两条路径吻合。另外 `_CUSTOMIZE_DICT_SCHEMA` 带 `extra=vol.ALLOW_EXTRA`，
+所以 `state_class` 这种"非标准"键不会被校验拒绝。
+
+**为什么放在 package 里而不是 `configuration.yaml`：**
+`core_config.py` 会把每个 package 的 `homeassistant: customize:` 合并进全局
+（`cust_exact.update(...)`），所以两者等价，但 package 文件小、易读、易回滚。
+
+**验证（务必做，不要只看属性）。** 属性存在 ≠ 统计在写。用 HA 的 WebSocket 命令
+`recorder/list_statistic_ids` 确认出现了该 `statistic_id`，且 `source` 为 `recorder`：
+
+```
+statistic_id: sensor.heweather_outside_temperature
+source:       recorder        <- 长期统计（永久）
+has_mean:     true
+unit_class:   temperature
+```
+
+再用 `recorder/statistics_during_period` 看是否真有数值：
+
+```
+13:00  mean=26.63  min=26.0  max=28.0
+```
+
+≥1 个小时点即表示统计已在累积。
+
+**注意事项：**
+
+- `measurement` 是 `device_class: temperature` **唯一**允许的 `state_class`
+  （见 `DEVICE_CLASS_STATE_CLASSES`）。写别的值会产生 "impossible considering
+  device class" 告警。
+- **单位字符串不能变。** 若该集成某天把 `°C` 改成别的单位，HA 会抑制统计并告警 ——
+  这是它唯一会抱怨的方式。
+- 这两项都是**用户侧配置**，集成本身**不会**修改任何 `configuration.yaml`。
+
 ---
 
 ## 6. 故障处理

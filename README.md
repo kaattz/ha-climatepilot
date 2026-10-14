@@ -207,9 +207,10 @@ V0.2 在此之上增加**燃烧质量分级**（`cycling_quality`，只看采暖
 这 6 个实体都带 `state_class`，因此进入 HA **长期统计（永久保留）**，不受
 `recorder.purge_keep_days` 影响。
 
-> **注意**：如果你想让**室外温度**也长期保留，需要给它单独加 `state_class`
-> （通过 `customize:`）。否则默认 30 天后被清除，将来会只剩一堆无法解释的燃气数字。
-> 集成**不会**修改你的 `configuration.yaml`。
+> **室外温度的 `state_class` 已在本机配置好**（2026-10-14）。见
+> [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 的「让室外温度进入长期统计」一节：
+> 为什么需要、为什么放在 package 里、以及如何验证它真的生效。
+> 集成本身**不会**修改你的配置文件 —— 这一项需要你自己做。
 
 ## 安装
 
