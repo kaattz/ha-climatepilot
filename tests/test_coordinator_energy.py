@@ -109,18 +109,80 @@ def test_the_energy_feature_is_enabled_only_by_a_meter(hass) -> None:
     assert with_meter(hass).energy_enabled is True
 
 
-def test_a_meter_that_does_not_exist_does_not_enable_the_feature(hass) -> None:
-    """A restarted-but-absent meter must not create six permanently-unknown sensors.
+def test_a_configured_meter_enables_the_feature_even_if_unavailable(hass) -> None:
+    """A configured meter must be enough, without the entity resolving first.
 
-    The config flow validates the entity when it is picked, but the sensor can be
-    renamed or deleted afterwards. Trusting a stale string would leave the user
-    with six broken entities and no hint as to why.
+    This previously required the meter entity to exist at setup, which was wrong and
+    shipped broken: Home Assistant loads integrations in an arbitrary order, so on
+    some boots another integration's sensor is not there yet. The six entities were
+    then never created, and because they were already in the registry Home Assistant
+    showed them as ``restored``/``unavailable`` until something reloaded the entry -
+    a quiet, long-lived failure rather than a visible one. Confirmed on the real
+    installation, where a manual reload made all six live again.
+
+    A stale id is accepted here and handled by ``note_energy``, which passes ``None``
+    through so the readings are honestly unknown. ``gas_meter_available``
+    distinguishes that from "no gas used yet".
     """
     install_entities(hass)
     coordinator = build(hass, **{CONF_GAS_METER_ENTITY: "sensor.removed_by_user"})
 
     assert coordinator.gas_meter_entity == "sensor.removed_by_user"
-    assert coordinator.energy_enabled is False
+    assert coordinator.energy_enabled is True
+    # The meter cannot be read, and the entity says so rather than pretending.
+    assert coordinator.gas_meter_available is False
+    assert coordinator.energy_snapshot()["gas_today"] is None
+
+
+def test_gas_meter_available_reflects_the_live_state(hass) -> None:
+    """The availability flag is what makes an unknown reading diagnosable."""
+    coordinator = with_meter(hass)
+    assert coordinator.gas_meter_available is True
+
+    hass.states.async_set(GAS, "unavailable")
+    assert coordinator.gas_meter_available is False
+
+    hass.states.async_set(GAS, "1010.0")
+    assert coordinator.gas_meter_available is True
+
+
+def test_energy_enabled_does_not_depend_on_load_order(hass) -> None:
+    """The root cause of the shipped bug, pinned directly.
+
+    ``energy_enabled`` must be a pure function of the configuration, not of whether
+    another integration has loaded yet. ``hass.states`` is empty here for anything
+    the fixture did not install, which is what a boot with unfavourable ordering
+    looks like.
+
+    Asserted by removing the meter state entirely - simulating "that integration has
+    not loaded yet" - and checking the feature is still enabled. The previous
+    implementation returned False here, which is what left six entities restored and
+    unavailable on the real system.
+    """
+    install_entities(hass)
+    coordinator = build(hass, **{CONF_GAS_METER_ENTITY: GAS})
+
+    # No state for the meter at all: it has not loaded yet.
+    hass.states.async_remove(GAS)
+    assert hass.states.get(GAS) is None
+
+    assert coordinator.energy_enabled is True, (
+        "enabling must not depend on another integration's load order"
+    )
+    assert coordinator.gas_meter_available is False
+
+
+def test_energy_snapshot_is_safe_before_the_meter_loads(hass) -> None:
+    """And reading it early must not raise or invent a value."""
+    install_entities(hass)
+    coordinator = build(hass, **{CONF_GAS_METER_ENTITY: GAS})
+    hass.states.async_remove(GAS)
+
+    coordinator.note_energy(T0)
+    snapshot = coordinator.energy_snapshot()
+
+    assert snapshot["gas_today"] is None
+    assert snapshot["gas_per_degree_day"] is None
 
 
 # ---------------------------------------------------------------------------

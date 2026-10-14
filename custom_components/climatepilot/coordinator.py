@@ -870,12 +870,24 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def energy_enabled(self) -> bool:
         """Whether the gas-metering entities should exist at all.
 
-        Requires both a configured meter **and** that entity actually resolving.
-        A stale entity id - the sensor was renamed or deleted after the flow
-        accepted it - would otherwise create six permanently-unknown sensors with
-        no explanation of why.
+        A configured meter is the only condition. **Deliberately not** "and the
+        meter entity currently resolves", which is what this used to be:
+
+        Home Assistant loads integrations in an arbitrary order, so on some boots
+        another integration's sensor does not exist yet when this one sets up.
+        Requiring it meant the six entities were never created on those boots - and
+        the failure is quiet and long-lived, because the entities are already in the
+        registry: Home Assistant shows them as ``restored`` and ``unavailable``
+        until something happens to reload this entry.
+
+        A stale entity id is therefore accepted here and handled where it belongs.
+        ``note_energy`` reads the state each cycle and passes ``None`` through when
+        it is missing, which the engine already renders as "unknown" rather than a
+        fabricated zero. The entities exist and honestly report nothing; they do not
+        disappear. The config flow validates the entity when it is chosen, so a typo
+        is caught there.
         """
-        return bool(self.gas_meter_entity and self.hass.states.get(self.gas_meter_entity))
+        return bool(self.gas_meter_entity)
 
     def note_energy(self, now: datetime) -> None:
         """Feed one observation to the energy monitor.
@@ -911,6 +923,20 @@ class ClimatePilotCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def energy_snapshot(self) -> dict[str, Any]:
         """Current gas and degree-day readings, for the sensor platform."""
         return self.energy_monitor.snapshot(self._now())
+
+    @property
+    def gas_meter_available(self) -> bool:
+        """Whether the configured meter can currently be read.
+
+        Published on the entities as an attribute so a genuinely missing or
+        renamed meter is diagnosable rather than merely silent. The readings go
+        ``unknown`` either way, which on its own cannot distinguish "no gas used
+        yet" from "the sensor is gone".
+        """
+        if not self.gas_meter_entity:
+            return False
+        state = self.hass.states.get(self.gas_meter_entity)
+        return state is not None and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
 
     def _restore_energy(self, data: Any) -> None:
         """Restore the accumulator, tolerating anything the store hands back."""

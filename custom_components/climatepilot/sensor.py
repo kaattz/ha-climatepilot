@@ -1123,7 +1123,14 @@ class GasTodaySensor(_EnergySensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {**self._scope_attributes, "meter_entity": self.coordinator.gas_meter_entity}
+        return {
+            **self._scope_attributes,
+            "meter_entity": self.coordinator.gas_meter_entity,
+            # The readings go `unknown` both when no gas has been used yet and when
+            # the meter entity has gone missing, which on its own is not
+            # diagnosable. This says which.
+            "meter_available": self.coordinator.gas_meter_available,
+        }
 
 
 class GasYesterdaySensor(_EnergySensor):
